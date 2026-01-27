@@ -1,1 +1,3 @@
-/* Empty - NativeWind removed for compatibility */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
