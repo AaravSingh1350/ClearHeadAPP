@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ],
+      "@/components/*": [
+        "./src/components/*"
+      ],
+      "@/stores/*": [
+        "./src/stores/*"
+      ],
+      "@/engines/*": [
+        "./src/engines/*"
+      ],
+      "@/styles/*": [
+        "./src/styles/*"
+      ],
+      "@/database/*": [
+        "./src/database/*"
+      ]
+    },
+    "esModuleInterop": true,
+    "jsx": "react-native",
+    "lib": [
+      "ES2022"
+    ],
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "target": "ES2022"
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts",
+    "nativewind-env.d.ts"
+  ],
+  "extends": "expo/tsconfig.base"
+}
