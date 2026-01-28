@@ -89,8 +89,26 @@ export const useThoughtsStore = create<ThoughtsState>((set, get) => ({
 
     deleteThought: async (id) => {
         const db = getDatabase();
-        await db.runAsync('DELETE FROM thoughts WHERE id = ?', [id]);
+        const timestamp = now();
+
+        // Get thought for timeline
+        const thought = get().thoughts.find(t => t.id === id);
+
+        // Optimistic delete
         set((state) => ({ thoughts: state.thoughts.filter((t) => t.id !== id) }));
+
+        // Database operations
+        await db.runAsync('DELETE FROM thoughts WHERE id = ?', [id]);
+
+        // Add timeline entry
+        if (thought) {
+            const timelineId = generateId();
+            await db.runAsync(
+                `INSERT INTO timeline_entries (id, entry_type, reference_id, title, description, created_at, was_avoided)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [timelineId, 'thought', id, `${thought.mode} thought deleted`, thought.answer.substring(0, 100), timestamp, 0]
+            );
+        }
     },
 
     getThoughtsByMode: (mode) => {

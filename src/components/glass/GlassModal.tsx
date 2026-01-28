@@ -2,7 +2,7 @@
 // Modal overlay with enhanced frosted glass background
 
 import React from 'react';
-import { View, StyleSheet, Pressable, Dimensions } from 'react-native';
+import { View, StyleSheet, Pressable, Dimensions, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
 import Animated, {
     FadeIn,
@@ -56,22 +56,35 @@ export function GlassModal({
                 </Pressable>
             </Animated.View>
 
-            {/* Modal content - centered with bottom padding for tab bar */}
-            <Animated.View
-                entering={SlideInDown.springify().damping(18)}
-                exiting={SlideOutDown.duration(200)}
-                style={[styles.contentContainer, { borderColor: colors.glassBorder }]}
+            {/* Modal content - scrollable */}
+            <KeyboardAvoidingView
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                style={styles.keyboardAvoid}
             >
-                <BlurView
-                    intensity={glassMorphism.blurHeavy}
-                    tint={colorScheme}
-                    style={StyleSheet.absoluteFill}
-                />
-                <View style={[styles.contentBackground, { backgroundColor: colors.glassSurface }]} />
-                <View style={[styles.content, { backgroundColor: colors.backgroundSecondary + 'E6' }]}>
-                    {children}
-                </View>
-            </Animated.View>
+                <Animated.View
+                    entering={SlideInDown.springify().damping(18)}
+                    exiting={SlideOutDown.duration(200)}
+                    style={[styles.contentContainer, { borderColor: colors.glassBorder }]}
+                >
+                    <BlurView
+                        intensity={glassMorphism.blurHeavy}
+                        tint={colorScheme}
+                        style={StyleSheet.absoluteFill}
+                    />
+                    <View style={[styles.contentBackground, { backgroundColor: colors.glassSurface }]} />
+                    <ScrollView
+                        style={styles.scrollView}
+                        contentContainerStyle={styles.scrollContent}
+                        showsVerticalScrollIndicator={false}
+                        bounces={false}
+                        keyboardShouldPersistTaps="handled"
+                    >
+                        <View style={[styles.content, { backgroundColor: colors.backgroundSecondary + 'E6' }]}>
+                            {children}
+                        </View>
+                    </ScrollView>
+                </Animated.View>
+            </KeyboardAvoidingView>
         </View>
     );
 }
@@ -79,11 +92,17 @@ export function GlassModal({
 const styles = StyleSheet.create({
     overlay: {
         ...StyleSheet.absoluteFillObject,
-        justifyContent: 'center', // Center the modal vertically
+        justifyContent: 'center',
         alignItems: 'center',
         zIndex: 1000,
         paddingHorizontal: 16,
-        paddingBottom: 100, // Space for tab bar
+        paddingTop: 50,
+        paddingBottom: 100,
+    },
+    keyboardAvoid: {
+        width: '100%',
+        maxWidth: 500,
+        maxHeight: SCREEN_HEIGHT * 0.8,
     },
     backdropTint: {
         ...StyleSheet.absoluteFillObject,
@@ -92,15 +111,21 @@ const styles = StyleSheet.create({
         borderRadius: glassMorphism.borderRadiusLarge,
         borderWidth: 1,
         overflow: 'hidden',
-        maxHeight: SCREEN_HEIGHT * 0.7,
+        maxHeight: SCREEN_HEIGHT * 0.8,
         width: '100%',
-        maxWidth: 500,
     },
     contentBackground: {
         ...StyleSheet.absoluteFillObject,
+    },
+    scrollView: {
+        maxHeight: SCREEN_HEIGHT * 0.75,
+    },
+    scrollContent: {
+        flexGrow: 1,
     },
     content: {
         padding: 24,
         borderRadius: glassMorphism.borderRadiusLarge,
     },
 });
+

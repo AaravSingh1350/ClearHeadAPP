@@ -1,7 +1,5 @@
-// Planner Screen
-// Cost-based planner with time blocking
-
-import React, { useState, useEffect } from 'react';
+// Time-based Daily Planner
+import React, { useState, useEffect, useMemo } from 'react';
 import {
     View,
     Text,
@@ -9,458 +7,467 @@ import {
     StyleSheet,
     Pressable,
     Alert,
+    TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
-import { GlassCard, GlassButton, GlassInput, GlassModal } from '@/components/glass';
-import { useAppStore, usePlannerStore, useThemeStore } from '@/stores';
-import { spacing, typography } from '@/styles/theme';
+import { GlassCard, GlassModal } from '@/components/glass';
+import { usePlannerStore, useThemeStore } from '@/stores';
+import { spacing } from '@/styles/theme';
 import { formatDate } from '@/database';
 import { Task } from '@/database/schema';
-import { useAnimationKey } from '@/utils/animations';
 
-const DAILY_PRIORITIES_LIMIT = 3;
+const TIME_SLOTS = [
+    '06:00', '07:00', '08:00', '09:00', '10:00', '11:00',
+    '12:00', '13:00', '14:00', '15:00', '16:00', '17:00',
+    '18:00', '19:00', '20:00', '21:00', '22:00'
+];
+
+const formatTime = (time: string): string => {
+    const [hours] = time.split(':');
+    const h = parseInt(hours);
+    if (h === 12) return '12 PM';
+    if (h > 12) return `${h - 12} PM`;
+    return `${h} AM`;
+};
+
+type ViewMode = 'today' | 'upcoming';
 
 export default function PlannerScreen() {
-    const animationKey = useAnimationKey();
-    const { colors, colorScheme } = useThemeStore();
-    const { selectedDate, setSelectedDate } = useAppStore();
+    const { colors } = useThemeStore();
     const {
-        tasks,
-        timeBlocks,
-        loadTasks,
-        loadTimeBlocks,
-        addTask,
-        completeTask,
-        skipTask,
-        updateTask,
-        deleteTask,
-        loadTodayTasks,
+        tasks, loadTasks,
+        addTask, updateTask, deleteTask,
+        completeTask, skipTask, undoTask,
+        overdueTasksCount, loadOverdueTasksCount,
     } = usePlannerStore();
 
+    const [viewMode, setViewMode] = useState<ViewMode>('today');
     const [showAddModal, setShowAddModal] = useState(false);
     const [showEditModal, setShowEditModal] = useState(false);
     const [editingTask, setEditingTask] = useState<Task | null>(null);
-    const [taskName, setTaskName] = useState('');
-    const [timeEstimate, setTimeEstimate] = useState('');
-    const [selectedPriority, setSelectedPriority] = useState<1 | 2 | 3 | null>(null);
-    const [showDecayCost, setShowDecayCost] = useState<string | null>(null);
+
+    // Form state
+    const [formName, setFormName] = useState('');
+    const [formDate, setFormDate] = useState(formatDate(Date.now()));
+    const [formTime, setFormTime] = useState<string | null>(null);
+    const [formDuration, setFormDuration] = useState('30');
+    const [formPriority, setFormPriority] = useState<1 | 2 | 3>(2);
 
     const today = formatDate(Date.now());
-    const isToday = selectedDate === today;
-    const isPast = selectedDate < today;
 
     useEffect(() => {
-        loadTasks(selectedDate);
-        loadTimeBlocks(selectedDate);
-    }, [selectedDate]);
+        loadTasks();
+        loadOverdueTasksCount();
+    }, []);
 
-    const dayTasks = tasks.filter(t => t.scheduled_date === selectedDate);
-    const pendingTasks = dayTasks.filter(t => t.status === 'pending' || t.status === 'in_progress');
-    const completedTasks = dayTasks.filter(t => t.status === 'completed');
-    const skippedTasks = dayTasks.filter(t => t.status === 'skipped');
+    // Next 7 days
+    const upcomingDates = useMemo(() => {
+        const dates: string[] = [];
+        for (let i = 0; i < 7; i++) {
+            const d = new Date();
+            d.setDate(d.getDate() + i);
+            dates.push(formatDate(d.getTime()));
+        }
+        return dates;
+    }, []);
 
-    const handleAddTask = async () => {
-        if (!taskName.trim()) return;
+    // Group tasks by date
+    const tasksByDate = useMemo(() => {
+        const grouped: Record<string, Task[]> = {};
+        tasks.forEach(task => {
+            const date = task.scheduled_date || today;
+            if (!grouped[date]) grouped[date] = [];
+            grouped[date].push(task);
+        });
+        // Sort by time
+        Object.keys(grouped).forEach(date => {
+            grouped[date].sort((a, b) => {
+                if (!a.scheduled_time && !b.scheduled_time) return 0;
+                if (!a.scheduled_time) return 1;
+                if (!b.scheduled_time) return -1;
+                return a.scheduled_time.localeCompare(b.scheduled_time);
+            });
+        });
+        return grouped;
+    }, [tasks, today]);
 
-        await addTask(
-            taskName,
-            parseInt(timeEstimate) || 30,
-            selectedDate,
-            selectedPriority || undefined
-        );
+    const todayTasks = tasksByDate[today] || [];
+    const pendingToday = todayTasks.filter(t => t.status === 'pending' || t.status === 'in_progress');
+    const skippedToday = todayTasks.filter(t => t.status === 'skipped');
+    const completedToday = todayTasks.filter(t => t.status === 'completed');
 
-        setTaskName('');
-        setTimeEstimate('');
-        setSelectedPriority(null);
-        setShowAddModal(false);
+    const resetForm = () => {
+        setFormName('');
+        setFormDate(formatDate(Date.now()));
+        setFormTime(null);
+        setFormDuration('30');
+        setFormPriority(2);
     };
 
-    const handleCompleteTask = async (taskId: string) => {
-        await completeTask(taskId);
+    const handleAdd = async () => {
+        if (!formName.trim()) {
+            Alert.alert('Error', 'Enter task name');
+            return;
+        }
+        try {
+            await addTask(formName.trim(), parseInt(formDuration) || 30, formDate, formPriority, false, undefined, undefined, formTime || undefined);
+            resetForm();
+            setShowAddModal(false);
+            loadTasks();
+        } catch (e) {
+            console.error(e);
+            Alert.alert('Error', 'Failed to add task');
+        }
     };
 
-    const handleSkipTask = async (taskId: string) => {
-        await skipTask(taskId);
+    const handleEdit = async () => {
+        if (!editingTask || !formName.trim()) return;
+        await updateTask(editingTask.id, {
+            name: formName,
+            scheduled_date: formDate,
+            scheduled_time: formTime,
+            time_estimate_minutes: parseInt(formDuration) || 30,
+            priority: formPriority,
+        });
+        resetForm();
+        setShowEditModal(false);
+        setEditingTask(null);
+        loadTasks();
     };
 
-    const handleEditTask = (task: Task) => {
+    const openEdit = (task: Task) => {
         setEditingTask(task);
-        setTaskName(task.name);
-        setTimeEstimate(task.time_estimate_minutes.toString());
-        setSelectedPriority(task.priority);
+        setFormName(task.name);
+        setFormDate(task.scheduled_date || today);
+        setFormTime(task.scheduled_time || null);
+        setFormDuration(String(task.time_estimate_minutes));
+        setFormPriority(task.priority || 2);
         setShowEditModal(true);
     };
 
-    const handleSaveEdit = async () => {
-        if (!editingTask || !taskName.trim()) return;
-        await updateTask(editingTask.id, {
-            name: taskName,
-            time_estimate_minutes: parseInt(timeEstimate) || 30,
-            priority: selectedPriority,
-        });
-        setShowEditModal(false);
-        setEditingTask(null);
-        setTaskName('');
-        setTimeEstimate('');
-        setSelectedPriority(null);
+    const handleDelete = (task: Task) => {
+        Alert.alert('Delete', `Delete "${task.name}"?`, [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Delete', style: 'destructive', onPress: async () => { await deleteTask(task.id); loadTasks(); } },
+        ]);
     };
 
-    const handleDeleteTask = (task: Task) => {
+    const handleComplete = async (id: string) => { await completeTask(id); };
+    const handleSkip = async (id: string) => { await skipTask(id); };
+    const handleUndo = async (id: string) => { await undoTask(id); };
+
+    // Smart Daily Plan Generator - Creates complete day schedule
+    const generatePlan = async () => {
         Alert.alert(
-            'Delete Task',
-            `Are you sure you want to delete "${task.name}"?`,
+            '✨ Generate Daily Plan',
+            'This will create a complete study schedule for today with:\n\n📚 Study Sessions\n✍️ Question Solving\n☕ Rest Breaks\n🍽️ Meal Times',
             [
                 { text: 'Cancel', style: 'cancel' },
-                {
-                    text: 'Delete',
-                    style: 'destructive',
-                    onPress: () => deleteTask(task.id),
-                },
+                { text: 'Generate', onPress: createDayPlan }
             ]
         );
     };
 
-    const handleLongPress = (taskId: string) => {
-        setShowDecayCost(taskId);
-        setTimeout(() => setShowDecayCost(null), 2000);
-    };
+    const createDayPlan = async () => {
+        // Get current hour to start from
+        const currentHour = new Date().getHours();
+        const startHour = Math.max(currentHour + 1, 6); // Start at least from next hour or 6 AM
 
-    const navigateDay = (direction: 'prev' | 'next') => {
-        const current = new Date(selectedDate);
-        current.setDate(current.getDate() + (direction === 'next' ? 1 : -1));
-        setSelectedDate(formatDate(current.getTime()));
-    };
+        // Define the day structure
+        const dayTemplate = [
+            // Morning Study Block
+            { time: '06:00', name: '🧘 Morning Routine & Revision', duration: 30, priority: 2, type: 'routine' },
+            { time: '07:00', name: '📚 Study Session 1 (High Focus)', duration: 90, priority: 1, type: 'study' },
+            { time: '08:30', name: '☕ Short Break', duration: 15, priority: 3, type: 'break' },
+            { time: '09:00', name: '✍️ Question Practice 1', duration: 60, priority: 1, type: 'questions' },
+            { time: '10:00', name: '📚 Study Session 2', duration: 60, priority: 1, type: 'study' },
+            { time: '11:00', name: '☕ Short Break + Snack', duration: 15, priority: 3, type: 'break' },
+            { time: '11:15', name: '✍️ Question Practice 2', duration: 45, priority: 1, type: 'questions' },
 
-    const formatTime = (timestamp: number) => {
-        const date = new Date(timestamp);
-        return date.toLocaleString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
+            // Lunch & Light Study
+            { time: '12:00', name: '🍽️ Lunch Break', duration: 60, priority: 3, type: 'meal' },
+            { time: '13:00', name: '📖 Light Reading / Notes Review', duration: 45, priority: 2, type: 'study' },
+            { time: '13:45', name: '😴 Power Nap (Optional)', duration: 20, priority: 3, type: 'break' },
+
+            // Afternoon Block
+            { time: '14:00', name: '📚 Study Session 3', duration: 90, priority: 1, type: 'study' },
+            { time: '15:30', name: '☕ Break + Walk', duration: 20, priority: 3, type: 'break' },
+            { time: '16:00', name: '✍️ Question Practice 3', duration: 60, priority: 1, type: 'questions' },
+            { time: '17:00', name: '📚 Study Session 4', duration: 60, priority: 2, type: 'study' },
+
+            // Evening Block
+            { time: '18:00', name: '🏃 Exercise / Fresh Air', duration: 30, priority: 2, type: 'break' },
+            { time: '18:30', name: '🍽️ Snack Break', duration: 15, priority: 3, type: 'meal' },
+            { time: '19:00', name: '✍️ Question Practice 4 (Mock Test)', duration: 90, priority: 1, type: 'questions' },
+            { time: '20:30', name: '🍽️ Dinner', duration: 45, priority: 3, type: 'meal' },
+
+            // Night Revision
+            { time: '21:15', name: '📝 Daily Revision & Weak Areas', duration: 45, priority: 1, type: 'study' },
+            { time: '22:00', name: '📋 Plan Tomorrow + Relax', duration: 30, priority: 2, type: 'routine' },
+        ];
+
+        // Filter only tasks starting from current time onwards
+        const relevantTasks = dayTemplate.filter(t => {
+            const [h] = t.time.split(':').map(Number);
+            return h >= startHour;
         });
+
+        // Check for existing tasks to avoid duplicates
+        const existingTimes = new Set(pendingToday.map(t => t.scheduled_time).filter(Boolean));
+
+        let added = 0;
+        for (const item of relevantTasks) {
+            // Skip if time slot already taken
+            if (existingTimes.has(item.time)) continue;
+
+            try {
+                await addTask(
+                    item.name,
+                    item.duration,
+                    today,
+                    item.priority as 1 | 2 | 3,
+                    false,
+                    undefined,
+                    undefined,
+                    item.time
+                );
+                added++;
+            } catch (e) {
+                console.error('Failed to add:', item.name, e);
+            }
+        }
+
+        loadTasks();
+        Alert.alert('✅ Plan Generated!', `Added ${added} tasks to your schedule.\n\nApni existing tasks bhi time ke saath adjust ho gayi hain!`);
     };
 
-    const isEdited = (task: Task) => {
-        return task.updated_at > task.created_at + 1000;
+    const formatDateLabel = (d: string) => {
+        if (d === today) return 'Today';
+        const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+        if (d === formatDate(tomorrow.getTime())) return 'Tomorrow';
+        return new Date(d).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
     };
 
-    const prioritiesUsed = pendingTasks.filter(t => t.priority !== null).length;
-    const canAddPriority = prioritiesUsed < DAILY_PRIORITIES_LIMIT;
+    const getPriorityColor = (p: number | null) => p === 1 ? '#EF4444' : p === 3 ? '#22C55E' : '#FBBF24';
+
     const styles = createStyles(colors);
+
+    const renderTask = (task: Task) => (
+        <View key={task.id} style={styles.taskCard}>
+            <View style={styles.taskLeft}>
+                {task.scheduled_time && (
+                    <View style={styles.timeBadge}>
+                        <Text style={styles.timeText}>{formatTime(task.scheduled_time)}</Text>
+                    </View>
+                )}
+                <View style={[styles.dot, { backgroundColor: getPriorityColor(task.priority) }]} />
+            </View>
+            <View style={styles.taskContent}>
+                <Text style={[styles.taskName, task.status === 'completed' && styles.taskDone]}>{task.name}</Text>
+                <Text style={styles.taskMeta}>{task.time_estimate_minutes} min</Text>
+            </View>
+            <View style={styles.actions}>
+                {task.status === 'pending' ? (
+                    <>
+                        <Pressable onPress={() => handleComplete(task.id)}><Ionicons name="checkmark-circle" size={26} color="#22C55E" /></Pressable>
+                        <Pressable onPress={() => handleSkip(task.id)}><Ionicons name="arrow-forward-circle" size={26} color="#FBBF24" /></Pressable>
+                        <Pressable onPress={() => openEdit(task)}><Ionicons name="create-outline" size={22} color={colors.textSecondary} /></Pressable>
+                        <Pressable onPress={() => handleDelete(task)}><Ionicons name="trash-outline" size={20} color="#EF4444" /></Pressable>
+                    </>
+                ) : (
+                    <Pressable onPress={() => handleUndo(task.id)}><Ionicons name="arrow-undo" size={22} color={colors.textSecondary} /></Pressable>
+                )}
+            </View>
+        </View>
+    );
 
     return (
         <SafeAreaView style={styles.container} edges={['top']}>
-            <ScrollView
-                style={styles.scrollView}
-                contentContainerStyle={styles.content}
-                showsVerticalScrollIndicator={false}
-            >
+            <ScrollView contentContainerStyle={styles.content}>
                 {/* Header */}
-                <Animated.View key={`header-${animationKey}`} entering={FadeInDown.delay(100)}>
-                    <Text style={styles.title}>Planner</Text>
-                    <Text style={styles.subtitle}>
-                        Max {DAILY_PRIORITIES_LIMIT} priorities per day. Every skip has a cost.
-                    </Text>
-                </Animated.View>
+                <Text style={styles.title}>Daily Planner</Text>
 
-                {/* Date Navigator */}
-                <Animated.View key={`date-${animationKey}`} entering={FadeInDown.delay(200)} style={styles.dateNav}>
-                    <Pressable onPress={() => navigateDay('prev')} style={styles.dateBtn}>
-                        <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
+                {/* Stats */}
+                <View style={styles.statsRow}>
+                    <View style={styles.stat}><Text style={styles.statNum}>{pendingToday.length}</Text><Text style={styles.statLabel}>Pending</Text></View>
+                    <View style={styles.stat}><Text style={[styles.statNum, { color: '#22C55E' }]}>{completedToday.length}</Text><Text style={styles.statLabel}>Done</Text></View>
+                    <View style={styles.stat}><Text style={[styles.statNum, { color: '#EF4444' }]}>{overdueTasksCount}</Text><Text style={styles.statLabel}>Overdue</Text></View>
+                </View>
+
+                {/* Toggle */}
+                <View style={styles.toggleRow}>
+                    <Pressable style={[styles.toggleBtn, viewMode === 'today' && styles.toggleActive]} onPress={() => setViewMode('today')}>
+                        <Text style={[styles.toggleText, viewMode === 'today' && styles.toggleTextActive]}>Today</Text>
                     </Pressable>
-                    <View style={styles.dateCenter}>
-                        <Text style={styles.dateText}>
-                            {isToday ? 'Today' : new Date(selectedDate).toLocaleDateString('en-US', {
-                                weekday: 'short',
-                                month: 'short',
-                                day: 'numeric',
-                            })}
-                        </Text>
-                        {isPast && (
-                            <Text style={styles.datePastLabel}>Past - Read Only</Text>
+                    <Pressable style={[styles.toggleBtn, viewMode === 'upcoming' && styles.toggleActive]} onPress={() => setViewMode('upcoming')}>
+                        <Text style={[styles.toggleText, viewMode === 'upcoming' && styles.toggleTextActive]}>Upcoming</Text>
+                    </Pressable>
+                </View>
+
+                {/* Action Buttons */}
+                <View style={styles.buttonRow}>
+                    <Pressable style={styles.addBtn} onPress={() => setShowAddModal(true)}>
+                        <Ionicons name="add" size={22} color="#FFF" />
+                        <Text style={styles.btnText}>Add Task</Text>
+                    </Pressable>
+                    <Pressable style={styles.genBtn} onPress={generatePlan}>
+                        <Ionicons name="sparkles" size={18} color="#FFF" />
+                        <Text style={styles.btnText}>Generate</Text>
+                    </Pressable>
+                </View>
+
+                {viewMode === 'today' ? (
+                    <View style={styles.section}>
+                        {pendingToday.length === 0 && skippedToday.length === 0 && completedToday.length === 0 ? (
+                            <View style={styles.empty}>
+                                <Ionicons name="calendar-outline" size={48} color={colors.textSecondary} />
+                                <Text style={styles.emptyText}>No tasks for today</Text>
+                            </View>
+                        ) : (
+                            <>
+                                {pendingToday.length > 0 && (
+                                    <>
+                                        <Text style={styles.sectionTitle}>📋 To Do</Text>
+                                        {pendingToday.map(renderTask)}
+                                    </>
+                                )}
+                                {skippedToday.length > 0 && (
+                                    <>
+                                        <Text style={styles.sectionTitle}>⏭️ Skipped (tap ✓ to complete)</Text>
+                                        {skippedToday.map(renderTask)}
+                                    </>
+                                )}
+                                {completedToday.length > 0 && (
+                                    <>
+                                        <Text style={styles.sectionTitle}>✅ Done</Text>
+                                        {completedToday.map(renderTask)}
+                                    </>
+                                )}
+                            </>
                         )}
                     </View>
-                    <Pressable onPress={() => navigateDay('next')} style={styles.dateBtn}>
-                        <Ionicons name="chevron-forward" size={24} color={colors.textPrimary} />
-                    </Pressable>
-                </Animated.View>
-
-                {/* Priority Counter */}
-                <Animated.View key={`priority-${animationKey}`} entering={FadeInDown.delay(250)} style={styles.priorityCounter}>
-                    <Text style={styles.priorityLabel}>Priorities Used</Text>
-                    <View style={styles.priorityDots}>
-                        {[1, 2, 3].map((i) => (
-                            <View
-                                key={i}
-                                style={[
-                                    styles.priorityDot,
-                                    prioritiesUsed >= i && styles.priorityDotActive,
-                                ]}
-                            />
-                        ))}
-                    </View>
-                </Animated.View>
-
-                {/* Add Task Button */}
-                {!isPast && (
-                    <Animated.View key={`add-${animationKey}`} entering={FadeInDown.delay(300)} style={styles.addSection}>
-                        <GlassButton
-                            title="Add Task"
-                            onPress={() => setShowAddModal(true)}
-                            fullWidth
-                            icon={<Ionicons name="add-circle-outline" size={20} color={colors.textPrimary} />}
-                        />
-                    </Animated.View>
-                )}
-
-                {/* Pending Tasks */}
-                {pendingTasks.length > 0 && (
-                    <Animated.View key={`pending-${animationKey}`} entering={FadeInUp.delay(400)}>
-                        <Text style={styles.sectionTitle}>To Do</Text>
-                        {pendingTasks.map((task, index) => {
-                            const edited = isEdited(task);
+                ) : (
+                    <View style={styles.section}>
+                        {upcomingDates.map(date => {
+                            const dateTasks = (tasksByDate[date] || []).filter(t => t.status === 'pending' || t.status === 'in_progress');
                             return (
-                                <Animated.View
-                                    key={task.id}
-                                    entering={FadeInUp.delay(400 + index * 50)}
-                                >
-                                    <Pressable
-                                        onLongPress={() => handleLongPress(task.id)}
-                                        delayLongPress={500}
-                                    >
-                                        <GlassCard depth={task.priority ? 2 : 1} style={styles.taskCard}>
-                                            {task.is_recovery && (
-                                                <View style={styles.recoveryBadge}>
-                                                    <Text style={styles.recoveryText}>RECOVERY</Text>
-                                                </View>
-                                            )}
-                                            <View style={styles.taskHeader}>
-                                                <View style={styles.taskInfo}>
-                                                    {task.priority && (
-                                                        <View style={styles.priorityBadge}>
-                                                            <Text style={styles.priorityBadgeText}>P{task.priority}</Text>
-                                                        </View>
-                                                    )}
-                                                    <Text style={styles.taskName}>{task.name}</Text>
-                                                    {edited && (
-                                                        <View style={styles.editedBadge}>
-                                                            <Text style={styles.editedText}>edited</Text>
-                                                        </View>
-                                                    )}
-                                                </View>
-                                                <View style={styles.taskActions}>
-                                                    <Pressable
-                                                        onPress={() => handleEditTask(task)}
-                                                        style={styles.actionBtn}
-                                                    >
-                                                        <Ionicons name="pencil" size={16} color={colors.textSecondary} />
-                                                    </Pressable>
-                                                    <Pressable
-                                                        onPress={() => handleDeleteTask(task)}
-                                                        style={styles.actionBtn}
-                                                    >
-                                                        <Ionicons name="trash-outline" size={16} color="#EF4444" />
-                                                    </Pressable>
-                                                </View>
-                                            </View>
-                                            <View style={styles.taskMeta}>
-                                                <Text style={styles.taskTime}>{task.time_estimate_minutes}min</Text>
-                                                <Text style={styles.taskTimestamp}>Added {formatTime(task.created_at)}</Text>
-                                            </View>
-
-                                            {showDecayCost === task.id && (
-                                                <Animated.View entering={FadeInUp} style={styles.decayCostReveal}>
-                                                    <Text style={styles.decayCostLabel}>Decay Cost</Text>
-                                                    <Text style={styles.decayCostValue}>{task.decay_cost}</Text>
-                                                </Animated.View>
-                                            )}
-
-                                            {!isPast && (
-                                                <View style={styles.taskButtons}>
-                                                    <GlassButton
-                                                        title="Skip"
-                                                        onPress={() => handleSkipTask(task.id)}
-                                                        variant="danger"
-                                                        size="small"
-                                                    />
-                                                    <GlassButton
-                                                        title="Complete"
-                                                        onPress={() => handleCompleteTask(task.id)}
-                                                        variant="primary"
-                                                        size="small"
-                                                    />
-                                                </View>
-                                            )}
-                                        </GlassCard>
-                                    </Pressable>
-                                </Animated.View>
+                                <View key={date} style={styles.dateBlock}>
+                                    <View style={styles.dateHeader}>
+                                        <Text style={styles.dateLabel}>{formatDateLabel(date)}</Text>
+                                        <Text style={styles.dateCount}>{dateTasks.length} tasks</Text>
+                                    </View>
+                                    {dateTasks.length === 0 ? (
+                                        <Text style={styles.noTasks}>No tasks</Text>
+                                    ) : (
+                                        dateTasks.map(renderTask)
+                                    )}
+                                </View>
                             );
                         })}
-                    </Animated.View>
-                )}
-
-                {/* Completed Tasks */}
-                {completedTasks.length > 0 && (
-                    <Animated.View key={`completed-${animationKey}`} entering={FadeInUp.delay(500)}>
-                        <Text style={styles.sectionTitle}>Completed</Text>
-                        {completedTasks.map((task) => (
-                            <GlassCard key={task.id} depth={1} style={styles.taskCardDone}>
-                                <View style={styles.taskHeader}>
-                                    <Ionicons name="checkmark-circle" size={20} color={colors.accentPositive} />
-                                    <Text style={styles.taskNameDone}>{task.name}</Text>
-                                </View>
-                                {task.completed_at && (
-                                    <Text style={styles.completedTime}>
-                                        Completed at {formatTime(task.completed_at)}
-                                    </Text>
-                                )}
-                            </GlassCard>
-                        ))}
-                    </Animated.View>
-                )}
-
-                {/* Skipped Tasks */}
-                {skippedTasks.length > 0 && (
-                    <Animated.View key={`skipped-${animationKey}`} entering={FadeInUp.delay(600)}>
-                        <Text style={styles.sectionTitle}>Skipped</Text>
-                        {skippedTasks.map((task) => (
-                            <View key={task.id} style={styles.skippedWrapper}>
-                                <BlurView intensity={20} tint={colorScheme} style={styles.skippedBlur} />
-                                <GlassCard depth={1} style={styles.taskCardSkipped}>
-                                    <Text style={styles.taskNameSkipped}>{task.name}</Text>
-                                    <Text style={styles.mutationNote}>→ Mutated to recovery task</Text>
-                                </GlassCard>
-                            </View>
-                        ))}
-                    </Animated.View>
-                )}
-
-                {/* Empty State */}
-                {dayTasks.length === 0 && (
-                    <Animated.View key={`empty-${animationKey}`} entering={FadeInUp.delay(400)}>
-                        <GlassCard depth={1} style={styles.emptyCard}>
-                            <Ionicons name="calendar-outline" size={48} color={colors.textSecondary} />
-                            <Text style={styles.emptyText}>No tasks for this day</Text>
-                        </GlassCard>
-                    </Animated.View>
+                    </View>
                 )}
             </ScrollView>
 
-            {/* Add Task Modal */}
-            <GlassModal visible={showAddModal} onClose={() => setShowAddModal(false)}>
+            {/* Add Modal */}
+            <GlassModal visible={showAddModal} onClose={() => { resetForm(); setShowAddModal(false); }}>
                 <Text style={styles.modalTitle}>Add Task</Text>
-                <GlassInput
-                    label="Task Name"
-                    placeholder="What needs to be done?"
-                    value={taskName}
-                    onChangeText={setTaskName}
-                    containerStyle={styles.modalInput}
-                />
-                <GlassInput
-                    label="Time Estimate (minutes)"
-                    placeholder="e.g., 45"
-                    value={timeEstimate}
-                    onChangeText={setTimeEstimate}
-                    keyboardType="numeric"
-                    containerStyle={styles.modalInput}
-                />
-                {canAddPriority && (
-                    <View style={styles.prioritySection}>
-                        <Text style={styles.prioritySelectLabel}>Set Priority (Optional)</Text>
-                        <View style={styles.priorityButtons}>
-                            {[1, 2, 3].map((p) => (
-                                <Pressable
-                                    key={p}
-                                    onPress={() => setSelectedPriority(selectedPriority === p ? null : p as 1 | 2 | 3)}
-                                    style={[
-                                        styles.prioritySelectBtn,
-                                        selectedPriority === p && styles.prioritySelectBtnActive,
-                                    ]}
-                                >
-                                    <Text
-                                        style={[
-                                            styles.prioritySelectText,
-                                            selectedPriority === p && styles.prioritySelectTextActive,
-                                        ]}
-                                    >
-                                        P{p}
-                                    </Text>
-                                </Pressable>
-                            ))}
-                        </View>
-                    </View>
-                )}
-                <View style={styles.modalButtons}>
-                    <GlassButton
-                        title="Cancel"
-                        onPress={() => setShowAddModal(false)}
-                        variant="ghost"
-                    />
-                    <GlassButton
-                        title="Add Task"
-                        onPress={handleAddTask}
-                        variant="primary"
-                        disabled={!taskName.trim()}
-                    />
+                <TextInput style={styles.input} placeholder="Task name" placeholderTextColor={colors.textSecondary} value={formName} onChangeText={setFormName} />
+
+                <Text style={styles.label}>Date</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
+                    {upcomingDates.map(d => (
+                        <Pressable key={d} style={[styles.chip, formDate === d && styles.chipActive]} onPress={() => setFormDate(d)}>
+                            <Text style={[styles.chipText, formDate === d && styles.chipTextActive]}>{formatDateLabel(d)}</Text>
+                        </Pressable>
+                    ))}
+                </ScrollView>
+
+                <Text style={styles.label}>Time (optional)</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
+                    <Pressable style={[styles.chip, formTime === null && styles.chipActive]} onPress={() => setFormTime(null)}>
+                        <Text style={[styles.chipText, formTime === null && styles.chipTextActive]}>No time</Text>
+                    </Pressable>
+                    {TIME_SLOTS.map(t => (
+                        <Pressable key={t} style={[styles.chip, formTime === t && styles.chipActive]} onPress={() => setFormTime(t)}>
+                            <Text style={[styles.chipText, formTime === t && styles.chipTextActive]}>{formatTime(t)}</Text>
+                        </Pressable>
+                    ))}
+                </ScrollView>
+
+                <Text style={styles.label}>Duration</Text>
+                <View style={styles.chipRow}>
+                    {['15', '30', '45', '60', '90'].map(d => (
+                        <Pressable key={d} style={[styles.chip, formDuration === d && styles.chipActive]} onPress={() => setFormDuration(d)}>
+                            <Text style={[styles.chipText, formDuration === d && styles.chipTextActive]}>{d} min</Text>
+                        </Pressable>
+                    ))}
+                </View>
+
+                <Text style={styles.label}>Priority</Text>
+                <View style={styles.chipRow}>
+                    {[{ v: 1, l: 'High', c: '#EF4444' }, { v: 2, l: 'Med', c: '#FBBF24' }, { v: 3, l: 'Low', c: '#22C55E' }].map(p => (
+                        <Pressable key={p.v} style={[styles.prioChip, formPriority === p.v && { borderColor: p.c, backgroundColor: p.c + '20' }]} onPress={() => setFormPriority(p.v as 1 | 2 | 3)}>
+                            <View style={[styles.prioDot, { backgroundColor: p.c }]} />
+                            <Text style={[styles.chipText, formPriority === p.v && { color: p.c }]}>{p.l}</Text>
+                        </Pressable>
+                    ))}
+                </View>
+
+                <View style={styles.modalBtns}>
+                    <Pressable style={styles.cancelBtn} onPress={() => { resetForm(); setShowAddModal(false); }}><Text style={styles.cancelText}>Cancel</Text></Pressable>
+                    <Pressable style={styles.confirmBtn} onPress={handleAdd}><Text style={styles.confirmText}>Add</Text></Pressable>
                 </View>
             </GlassModal>
 
-            {/* Edit Task Modal */}
-            <GlassModal visible={showEditModal} onClose={() => setShowEditModal(false)}>
+            {/* Edit Modal */}
+            <GlassModal visible={showEditModal} onClose={() => { resetForm(); setShowEditModal(false); setEditingTask(null); }}>
                 <Text style={styles.modalTitle}>Edit Task</Text>
-                <GlassInput
-                    label="Task Name"
-                    placeholder="What needs to be done?"
-                    value={taskName}
-                    onChangeText={setTaskName}
-                    containerStyle={styles.modalInput}
-                />
-                <GlassInput
-                    label="Time Estimate (minutes)"
-                    placeholder="e.g., 45"
-                    value={timeEstimate}
-                    onChangeText={setTimeEstimate}
-                    keyboardType="numeric"
-                    containerStyle={styles.modalInput}
-                />
-                <View style={styles.prioritySection}>
-                    <Text style={styles.prioritySelectLabel}>Priority</Text>
-                    <View style={styles.priorityButtons}>
-                        {[1, 2, 3].map((p) => (
-                            <Pressable
-                                key={p}
-                                onPress={() => setSelectedPriority(selectedPriority === p ? null : p as 1 | 2 | 3)}
-                                style={[
-                                    styles.prioritySelectBtn,
-                                    selectedPriority === p && styles.prioritySelectBtnActive,
-                                ]}
-                            >
-                                <Text
-                                    style={[
-                                        styles.prioritySelectText,
-                                        selectedPriority === p && styles.prioritySelectTextActive,
-                                    ]}
-                                >
-                                    P{p}
-                                </Text>
-                            </Pressable>
-                        ))}
-                    </View>
+                <TextInput style={styles.input} placeholder="Task name" placeholderTextColor={colors.textSecondary} value={formName} onChangeText={setFormName} />
+
+                <Text style={styles.label}>Date</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
+                    {upcomingDates.map(d => (
+                        <Pressable key={d} style={[styles.chip, formDate === d && styles.chipActive]} onPress={() => setFormDate(d)}>
+                            <Text style={[styles.chipText, formDate === d && styles.chipTextActive]}>{formatDateLabel(d)}</Text>
+                        </Pressable>
+                    ))}
+                </ScrollView>
+
+                <Text style={styles.label}>Time</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
+                    <Pressable style={[styles.chip, formTime === null && styles.chipActive]} onPress={() => setFormTime(null)}>
+                        <Text style={[styles.chipText, formTime === null && styles.chipTextActive]}>No time</Text>
+                    </Pressable>
+                    {TIME_SLOTS.map(t => (
+                        <Pressable key={t} style={[styles.chip, formTime === t && styles.chipActive]} onPress={() => setFormTime(t)}>
+                            <Text style={[styles.chipText, formTime === t && styles.chipTextActive]}>{formatTime(t)}</Text>
+                        </Pressable>
+                    ))}
+                </ScrollView>
+
+                <Text style={styles.label}>Duration</Text>
+                <View style={styles.chipRow}>
+                    {['15', '30', '45', '60', '90'].map(d => (
+                        <Pressable key={d} style={[styles.chip, formDuration === d && styles.chipActive]} onPress={() => setFormDuration(d)}>
+                            <Text style={[styles.chipText, formDuration === d && styles.chipTextActive]}>{d} min</Text>
+                        </Pressable>
+                    ))}
                 </View>
-                <View style={styles.modalButtons}>
-                    <GlassButton
-                        title="Cancel"
-                        onPress={() => setShowEditModal(false)}
-                        variant="ghost"
-                    />
-                    <GlassButton
-                        title="Save"
-                        onPress={handleSaveEdit}
-                        variant="primary"
-                        disabled={!taskName.trim()}
-                    />
+
+                <Text style={styles.label}>Priority</Text>
+                <View style={styles.chipRow}>
+                    {[{ v: 1, l: 'High', c: '#EF4444' }, { v: 2, l: 'Med', c: '#FBBF24' }, { v: 3, l: 'Low', c: '#22C55E' }].map(p => (
+                        <Pressable key={p.v} style={[styles.prioChip, formPriority === p.v && { borderColor: p.c, backgroundColor: p.c + '20' }]} onPress={() => setFormPriority(p.v as 1 | 2 | 3)}>
+                            <View style={[styles.prioDot, { backgroundColor: p.c }]} />
+                            <Text style={[styles.chipText, formPriority === p.v && { color: p.c }]}>{p.l}</Text>
+                        </Pressable>
+                    ))}
+                </View>
+
+                <View style={styles.modalBtns}>
+                    <Pressable style={styles.cancelBtn} onPress={() => { resetForm(); setShowEditModal(false); setEditingTask(null); }}><Text style={styles.cancelText}>Cancel</Text></Pressable>
+                    <Pressable style={styles.confirmBtn} onPress={handleEdit}><Text style={styles.confirmText}>Save</Text></Pressable>
                 </View>
             </GlassModal>
         </SafeAreaView>
@@ -468,285 +475,62 @@ export default function PlannerScreen() {
 }
 
 const createStyles = (colors: any) => StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: colors.background,
-    },
-    scrollView: {
-        flex: 1,
-    },
-    content: {
-        padding: spacing.lg,
-        paddingBottom: 100,
-    },
-    title: {
-        fontSize: typography.h1.fontSize,
-        fontWeight: '700',
-        color: colors.textPrimary,
-        marginBottom: spacing.xs,
-    },
-    subtitle: {
-        fontSize: typography.body.fontSize,
-        color: colors.textSecondary,
-        marginBottom: spacing.lg,
-    },
-    dateNav: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        marginBottom: spacing.lg,
-    },
-    dateBtn: {
-        padding: spacing.sm,
-    },
-    dateCenter: {
-        alignItems: 'center',
-    },
-    dateText: {
-        fontSize: typography.h2.fontSize,
-        fontWeight: '600',
-        color: colors.textPrimary,
-    },
-    datePastLabel: {
-        fontSize: typography.caption.fontSize,
-        color: colors.textSecondary,
-        marginTop: 2,
-    },
-    priorityCounter: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: spacing.md,
-        marginBottom: spacing.lg,
-    },
-    priorityLabel: {
-        fontSize: typography.caption.fontSize,
-        color: colors.textSecondary,
-    },
-    priorityDots: {
-        flexDirection: 'row',
-        gap: spacing.xs,
-    },
-    priorityDot: {
-        width: 12,
-        height: 12,
-        borderRadius: 6,
-        borderWidth: 1,
-        borderColor: colors.textSecondary,
-    },
-    priorityDotActive: {
-        backgroundColor: colors.accentPositive,
-        borderColor: colors.accentPositive,
-    },
-    addSection: {
-        marginBottom: spacing.xl,
-    },
-    sectionTitle: {
-        fontSize: typography.h3.fontSize,
-        fontWeight: '600',
-        color: colors.textPrimary,
-        marginBottom: spacing.md,
-        marginTop: spacing.md,
-    },
-    taskCard: {
-        padding: spacing.md,
-        marginBottom: spacing.sm,
-    },
-    recoveryBadge: {
-        backgroundColor: 'rgba(239, 68, 68, 0.2)',
-        paddingHorizontal: spacing.sm,
-        paddingVertical: 2,
-        borderRadius: 4,
-        alignSelf: 'flex-start',
-        marginBottom: spacing.sm,
-    },
-    recoveryText: {
-        fontSize: 10,
-        fontWeight: '700',
-        color: '#EF4444',
-        letterSpacing: 1,
-    },
-    taskHeader: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'flex-start',
-    },
-    taskInfo: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: spacing.sm,
-        flex: 1,
-        flexWrap: 'wrap',
-    },
-    priorityBadge: {
-        backgroundColor: colors.accentPositive,
-        paddingHorizontal: 6,
-        paddingVertical: 2,
-        borderRadius: 4,
-    },
-    priorityBadgeText: {
-        fontSize: 10,
-        fontWeight: '700',
-        color: colors.background,
-    },
-    taskName: {
-        fontSize: typography.body.fontSize,
-        fontWeight: '600',
-        color: colors.textPrimary,
-        flex: 1,
-    },
-    editedBadge: {
-        backgroundColor: 'rgba(251, 191, 36, 0.2)',
-        paddingHorizontal: 6,
-        paddingVertical: 2,
-        borderRadius: 4,
-    },
-    editedText: {
-        fontSize: 10,
-        color: '#FBBF24',
-        fontWeight: '600',
-    },
-    taskActions: {
-        flexDirection: 'row',
-        gap: spacing.sm,
-    },
-    actionBtn: {
-        padding: 4,
-    },
-    taskMeta: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        marginTop: spacing.xs,
-    },
-    taskTime: {
-        fontSize: typography.caption.fontSize,
-        color: colors.textSecondary,
-    },
-    taskTimestamp: {
-        fontSize: typography.caption.fontSize,
-        color: colors.textSecondary,
-        fontStyle: 'italic',
-    },
-    decayCostReveal: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: spacing.sm,
-        marginTop: spacing.sm,
-        paddingTop: spacing.sm,
-        borderTopWidth: 1,
-        borderTopColor: colors.glassBorder,
-    },
-    decayCostLabel: {
-        fontSize: typography.caption.fontSize,
-        color: colors.textSecondary,
-    },
-    decayCostValue: {
-        fontSize: typography.h3.fontSize,
-        fontWeight: '700',
-        color: '#EF4444',
-    },
-    taskButtons: {
-        flexDirection: 'row',
-        justifyContent: 'flex-end',
-        gap: spacing.sm,
-        marginTop: spacing.md,
-    },
-    taskCardDone: {
-        padding: spacing.md,
-        marginBottom: spacing.sm,
-        opacity: 0.7,
-    },
-    taskNameDone: {
-        fontSize: typography.body.fontSize,
-        color: colors.textSecondary,
-        marginLeft: spacing.sm,
-        textDecorationLine: 'line-through',
-    },
-    completedTime: {
-        fontSize: typography.caption.fontSize,
-        color: colors.textSecondary,
-        marginTop: spacing.xs,
-        marginLeft: 28,
-    },
-    skippedWrapper: {
-        position: 'relative',
-        marginBottom: spacing.sm,
-    },
-    skippedBlur: {
-        ...StyleSheet.absoluteFillObject,
-        borderRadius: 16,
-    },
-    taskCardSkipped: {
-        padding: spacing.md,
-        opacity: 0.5,
-    },
-    taskNameSkipped: {
-        fontSize: typography.body.fontSize,
-        color: colors.textSecondary,
-        textDecorationLine: 'line-through',
-    },
-    mutationNote: {
-        fontSize: typography.caption.fontSize,
-        color: '#EF4444',
-        marginTop: spacing.xs,
-    },
-    emptyCard: {
-        padding: spacing.xxl,
-        alignItems: 'center',
-    },
-    emptyText: {
-        fontSize: typography.h3.fontSize,
-        fontWeight: '600',
-        color: colors.textSecondary,
-        marginTop: spacing.md,
-    },
-    modalTitle: {
-        fontSize: typography.h2.fontSize,
-        fontWeight: '600',
-        color: colors.textPrimary,
-        marginBottom: spacing.lg,
-        textAlign: 'center',
-    },
-    modalInput: {
-        marginBottom: spacing.md,
-    },
-    prioritySection: {
-        marginBottom: spacing.lg,
-    },
-    prioritySelectLabel: {
-        fontSize: typography.body.fontSize,
-        color: colors.textSecondary,
-        marginBottom: spacing.sm,
-    },
-    priorityButtons: {
-        flexDirection: 'row',
-        gap: spacing.sm,
-    },
-    prioritySelectBtn: {
-        flex: 1,
-        paddingVertical: spacing.sm,
-        borderRadius: 12,
-        borderWidth: 1,
-        borderColor: colors.glassBorder,
-        backgroundColor: colors.glassSurface,
-        alignItems: 'center',
-    },
-    prioritySelectBtnActive: {
-        borderColor: colors.accentPositive,
-        backgroundColor: 'rgba(74, 222, 128, 0.2)',
-    },
-    prioritySelectText: {
-        fontSize: typography.body.fontSize,
-        fontWeight: '600',
-        color: colors.textSecondary,
-    },
-    prioritySelectTextActive: {
-        color: colors.accentPositive,
-    },
-    modalButtons: {
-        flexDirection: 'row',
-        justifyContent: 'flex-end',
-        gap: spacing.sm,
-    },
+    container: { flex: 1, backgroundColor: colors.background },
+    content: { padding: spacing.lg, paddingBottom: 100 },
+    title: { fontSize: 28, fontWeight: '700', color: colors.textPrimary, marginBottom: spacing.md },
+    // Stats
+    statsRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
+    stat: { flex: 1, backgroundColor: colors.glassSurface, borderRadius: 12, padding: spacing.md, alignItems: 'center', borderWidth: 1, borderColor: colors.glassBorder },
+    statNum: { fontSize: 22, fontWeight: '700', color: colors.textPrimary },
+    statLabel: { fontSize: 11, color: colors.textSecondary },
+    // Toggle
+    toggleRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
+    toggleBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: colors.glassSurface, borderWidth: 1, borderColor: colors.glassBorder },
+    toggleActive: { backgroundColor: colors.accentPositive, borderColor: colors.accentPositive },
+    toggleText: { fontSize: 14, color: colors.textSecondary },
+    toggleTextActive: { color: '#000', fontWeight: '600' },
+    // Buttons
+    buttonRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg },
+    addBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#3B82F6', paddingVertical: 12, borderRadius: 10 },
+    genBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#8B5CF6', paddingVertical: 12, borderRadius: 10 },
+    btnText: { fontSize: 14, fontWeight: '600', color: '#FFF' },
+    // Section
+    section: { marginTop: spacing.sm },
+    sectionTitle: { fontSize: 16, fontWeight: '600', color: colors.textPrimary, marginBottom: spacing.sm, marginTop: spacing.md },
+    dateBlock: { marginBottom: spacing.lg },
+    dateHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: spacing.sm, paddingBottom: spacing.xs, borderBottomWidth: 1, borderBottomColor: colors.glassBorder },
+    dateLabel: { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
+    dateCount: { fontSize: 12, color: colors.textSecondary },
+    noTasks: { fontSize: 13, color: colors.textSecondary, fontStyle: 'italic' },
+    // Task
+    taskCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.glassSurface, borderRadius: 10, padding: spacing.sm, marginBottom: spacing.xs, borderWidth: 1, borderColor: colors.glassBorder },
+    taskLeft: { flexDirection: 'row', alignItems: 'center', gap: 6, marginRight: spacing.sm },
+    timeBadge: { backgroundColor: 'rgba(59,130,246,0.15)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+    timeText: { fontSize: 10, fontWeight: '600', color: '#3B82F6' },
+    dot: { width: 6, height: 6, borderRadius: 3 },
+    taskContent: { flex: 1 },
+    taskName: { fontSize: 14, fontWeight: '500', color: colors.textPrimary },
+    taskDone: { textDecorationLine: 'line-through', color: colors.textSecondary },
+    taskMeta: { fontSize: 11, color: colors.textSecondary },
+    actions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    // Empty
+    empty: { alignItems: 'center', paddingVertical: spacing.xxl },
+    emptyText: { fontSize: 14, color: colors.textSecondary, marginTop: spacing.sm },
+    // Modal
+    modalTitle: { fontSize: 18, fontWeight: '600', color: colors.textPrimary, textAlign: 'center', marginBottom: spacing.md },
+    input: { backgroundColor: colors.glassSurface, borderRadius: 8, padding: spacing.sm, fontSize: 14, color: colors.textPrimary, borderWidth: 1, borderColor: colors.glassBorder, marginBottom: spacing.md },
+    label: { fontSize: 13, color: colors.textSecondary, marginBottom: spacing.xs },
+    chipScroll: { marginBottom: spacing.md },
+    chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginBottom: spacing.md },
+    chip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: colors.glassSurface, borderWidth: 1, borderColor: colors.glassBorder, marginRight: spacing.xs },
+    chipActive: { backgroundColor: colors.accentPositive, borderColor: colors.accentPositive },
+    chipText: { fontSize: 12, color: colors.textSecondary },
+    chipTextActive: { color: '#000', fontWeight: '600' },
+    prioChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: colors.glassSurface, borderWidth: 1, borderColor: colors.glassBorder },
+    prioDot: { width: 8, height: 8, borderRadius: 4 },
+    modalBtns: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
+    cancelBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center', backgroundColor: colors.glassSurface },
+    cancelText: { fontSize: 14, color: colors.textSecondary },
+    confirmBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center', backgroundColor: '#3B82F6' },
+    confirmText: { fontSize: 14, fontWeight: '600', color: '#FFF' },
 });

@@ -245,6 +245,180 @@ export default function BackupScreen() {
         }
     };
 
+    // Clear timeline history
+    const handleClearHistory = (days: number) => {
+        const label = days === 0 ? 'ALL timeline history' : `last ${days} days of history`;
+
+        Alert.alert(
+            '⚠️ Clear History',
+            `Are you sure you want to delete ${label}? This cannot be undone.`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: async () => {
+                        try {
+                            const db = getDatabase();
+
+                            if (days === 0) {
+                                // Delete all
+                                await db.runAsync('DELETE FROM timeline_entries');
+                            } else {
+                                // Delete entries older than X days ago
+                                const cutoffDate = Date.now() - (days * 24 * 60 * 60 * 1000);
+                                await db.runAsync(
+                                    'DELETE FROM timeline_entries WHERE created_at >= ?',
+                                    [cutoffDate]
+                                );
+                            }
+
+                            Alert.alert('✅ Done', `Timeline history cleared successfully!`);
+                        } catch (error) {
+                            console.error('Clear history failed:', error);
+                            Alert.alert('Error', 'Failed to clear history');
+                        }
+                    }
+                }
+            ]
+        );
+    };
+
+    // State for selective delete
+    const [showDeleteModal, setShowDeleteModal] = useState(false);
+    const [availableDates, setAvailableDates] = useState<string[]>([]);
+    const [selectedDeleteDates, setSelectedDeleteDates] = useState<Set<string>>(new Set());
+    const [isLoadingDates, setIsLoadingDates] = useState(false);
+
+    const loadAvailableDates = async () => {
+        setIsLoadingDates(true);
+        try {
+            const db = getDatabase();
+            // Get unique dates from timeline
+            const result = await db.getAllAsync<{ created_at: number }>(
+                'SELECT DISTINCT created_at FROM timeline_entries ORDER BY created_at DESC'
+            );
+
+            // Extract unique date strings (YYYY-MM-DD)
+            const dates = new Set<string>();
+            result.forEach(row => {
+                const d = new Date(row.created_at);
+                const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                dates.add(localDate);
+            });
+
+            setAvailableDates(Array.from(dates));
+        } catch (error) {
+            console.error('Failed to load dates:', error);
+        } finally {
+            setIsLoadingDates(false);
+        }
+    };
+
+    const toggleDeleteDate = (date: string) => {
+        const next = new Set(selectedDeleteDates);
+        if (next.has(date)) next.delete(date);
+        else next.add(date);
+        setSelectedDeleteDates(next);
+    };
+
+    const confirmDeleteDates = async () => {
+        if (selectedDeleteDates.size === 0) return;
+
+        Alert.alert(
+            'Confirm Delete',
+            `Delete history for ${selectedDeleteDates.size} selected days?`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: async () => {
+                        try {
+                            const db = getDatabase();
+                            const dates = Array.from(selectedDeleteDates);
+
+                            for (const dateStr of dates) {
+                                // dateStr is YYYY-MM-DD
+                                const [y, m, d] = dateStr.split('-').map(Number);
+                                const start = new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+                                const end = new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
+
+                                await db.runAsync(
+                                    'DELETE FROM timeline_entries WHERE created_at >= ? AND created_at <= ?',
+                                    [start, end]
+                                );
+                            }
+
+                            setShowDeleteModal(false);
+                            setSelectedDeleteDates(new Set());
+                            Alert.alert('Success', 'Selected history deleted');
+                        } catch (e) {
+                            console.error(e);
+                            Alert.alert('Error', 'Failed to delete history');
+                        }
+                    }
+                }
+            ]
+        );
+    };
+
+    // Export to CSV function
+    const exportToCSV = async () => {
+        try {
+            const db = getDatabase();
+            const entries = await db.getAllAsync<any>(
+                'SELECT * FROM timeline_entries ORDER BY created_at DESC'
+            );
+
+            if (entries.length === 0) {
+                Alert.alert('Info', 'No history to export');
+                return;
+            }
+
+            // CSV Header
+            let csvContent = "Date,Time,Activity Type,Title,Description,Status\n";
+
+            // CSV Rows
+            entries.forEach(entry => {
+                const dateObj = new Date(entry.created_at);
+                const date = dateObj.toLocaleDateString();
+                const time = dateObj.toLocaleTimeString();
+                const type = entry.entry_type;
+                // Escape quotes and handle commas
+                const title = `"${(entry.title || '').replace(/"/g, '""')}"`;
+                const desc = `"${(entry.description || '').replace(/"/g, '""')}"`;
+                const status = entry.was_avoided ? 'Missed/Skipped' : 'Completed';
+
+                csvContent += `${date},${time},${type},${title},${desc},${status}\n`;
+            });
+
+            const fileName = `Timeline_History_${formatDate(Date.now()).replace(/[: ]/g, '_')}.csv`;
+            const filePath = `${FileSystem.documentDirectory}${fileName}`;
+
+            await FileSystem.writeAsStringAsync(filePath, csvContent);
+
+            if (await Sharing.isAvailableAsync()) {
+                await Sharing.shareAsync(filePath, {
+                    mimeType: 'text/csv',
+                    dialogTitle: 'Export Timeline History',
+                    UTI: 'public.comma-separated-values-text'
+                });
+            } else {
+                Alert.alert('Error', 'Sharing not available');
+            }
+        } catch (error) {
+            console.error('CSV Export failed:', error);
+            Alert.alert('Error', 'Failed to export CSV');
+        }
+    };
+
+    // Open selective delete modal
+    const openSelectiveDelete = () => {
+        loadAvailableDates();
+        setShowDeleteModal(true);
+    };
+
     const styles = createStyles(colors);
 
     return (
@@ -297,23 +471,39 @@ export default function BackupScreen() {
                         <View style={styles.actionInfo}>
                             <Ionicons name="cloud-upload-outline" size={32} color={colors.accentPositive} />
                             <View style={styles.actionText}>
-                                <Text style={styles.actionTitle}>Export Backup</Text>
+                                <Text style={styles.actionTitle}>Full Backup (Encrypted)</Text>
                                 <Text style={styles.actionDesc}>
-                                    Create encrypted .clearhead file
+                                    Export all app data securely
                                 </Text>
-                                {lastBackup && (
-                                    <Text style={styles.lastBackup}>
-                                        Last backup: {lastBackup}
-                                    </Text>
-                                )}
+                                {lastBackup && <Text style={styles.lastBackup}>Last: {lastBackup}</Text>}
                             </View>
                         </View>
                         <GlassButton
-                            title="Export"
+                            title="Export Backup"
                             onPress={handleExport}
                             variant="primary"
                             loading={isExporting}
                             icon={<Ionicons name="download-outline" size={18} color={colorScheme === 'dark' ? '#FFFFFF' : '#1A1A1A'} />}
+                        />
+                    </GlassCard>
+                </Animated.View>
+
+                {/* CSV Export */}
+                <Animated.View key={`csv-${animationKey}`} entering={FadeInUp.delay(300)}>
+                    <GlassCard depth={1} style={styles.actionCard}>
+                        <View style={styles.actionInfo}>
+                            <Ionicons name="document-text-outline" size={32} color="#10B981" />
+                            <View style={styles.actionText}>
+                                <Text style={styles.actionTitle}>Export to Excel (CSV)</Text>
+                                <Text style={styles.actionDesc}>
+                                    Save timeline history as spreadsheet
+                                </Text>
+                            </View>
+                        </View>
+                        <GlassButton
+                            title="Download CSV"
+                            onPress={exportToCSV}
+                            icon={<Ionicons name="share-outline" size={18} color={colors.textPrimary} />}
                         />
                     </GlassCard>
                 </Animated.View>
@@ -331,7 +521,7 @@ export default function BackupScreen() {
                             </View>
                         </View>
                         <GlassButton
-                            title="Import"
+                            title="Import Data"
                             onPress={handleImport}
                             loading={isImporting}
                             icon={<Ionicons name="folder-open-outline" size={18} color={colors.textPrimary} />}
@@ -339,26 +529,39 @@ export default function BackupScreen() {
                     </GlassCard>
                 </Animated.View>
 
-                {/* Data Info */}
-                <Animated.View key={`data-${animationKey}`} entering={FadeInUp.delay(500)}>
-                    <Text style={styles.sectionTitle}>Data Storage</Text>
-                    <GlassCard depth={1} style={styles.infoCard}>
-                        {[
-                            { icon: 'lock-closed-outline', text: 'All data stored locally', checked: true },
-                            { icon: 'cloud-offline-outline', text: 'No cloud sync', checked: true },
-                            { icon: 'key-outline', text: 'Secured with encryption', checked: true },
-                        ].map((item, index) => (
-                            <View key={index} style={styles.infoRow}>
-                                <Ionicons name={item.icon as any} size={18} color={colors.textSecondary} />
-                                <Text style={styles.infoText}>{item.text}</Text>
-                                <Ionicons name="checkmark" size={18} color={colors.accentPositive} />
+                {/* Clear History Section */}
+                <Animated.View key={`clear-${animationKey}`} entering={FadeInUp.delay(500)}>
+                    <Text style={styles.sectionTitle}>History Management</Text>
+                    <GlassCard depth={1} style={styles.actionCard}>
+                        <View style={styles.actionInfo}>
+                            <Ionicons name="trash-outline" size={32} color="#EF4444" />
+                            <View style={styles.actionText}>
+                                <Text style={styles.actionTitle}>Clear Timeline</Text>
+                                <Text style={styles.actionDesc}>
+                                    Remove old activity logs
+                                </Text>
                             </View>
-                        ))}
+                        </View>
+                        <View style={styles.clearButtonsRow}>
+                            <Pressable
+                                style={[styles.clearBtn, { backgroundColor: colors.glassSurface, borderWidth: 1, borderColor: colors.glassBorder }]}
+                                onPress={openSelectiveDelete}
+                            >
+                                <Ionicons name="calendar-outline" size={16} color={colors.textPrimary} />
+                                <Text style={[styles.clearBtnText, { color: colors.textPrimary }]}>Select Dates</Text>
+                            </Pressable>
+                            <Pressable
+                                style={[styles.clearBtn, { backgroundColor: '#EF444420', borderColor: '#EF4444' }]}
+                                onPress={() => handleClearHistory(0)}
+                            >
+                                <Text style={[styles.clearBtnText, { color: '#EF4444' }]}>Clear All</Text>
+                            </Pressable>
+                        </View>
                     </GlassCard>
                 </Animated.View>
 
                 {/* Developer Info */}
-                <Animated.View key={`dev-${animationKey}`} entering={FadeInUp.delay(550)}>
+                <Animated.View key={`dev-${animationKey}`} entering={FadeInUp.delay(600)}>
                     <Text style={styles.sectionTitle}>Developer</Text>
                     <Pressable onPress={() => Linking.openURL('https://github.com/AaravSingh1350')}>
                         <GlassCard depth={2} intensity="heavy" style={styles.devCard}>
@@ -367,7 +570,6 @@ export default function BackupScreen() {
                                 <View style={styles.devTextContainer}>
                                     <Text style={styles.devLabel}>Developed by</Text>
                                     <Text style={styles.devName}>Aarav Singh Rajpoot</Text>
-                                    <Text style={styles.devLink}>github.com/AaravSingh1350</Text>
                                 </View>
                                 <Ionicons name="open-outline" size={20} color={colors.accentPositive} />
                             </View>
@@ -376,67 +578,60 @@ export default function BackupScreen() {
                 </Animated.View>
 
                 {/* App Info */}
-                <Animated.View key={`app-${animationKey}`} entering={FadeInUp.delay(600)}>
-                    <GlassCard depth={1} style={styles.appInfoCard}>
-                        <Ionicons name="shield-checkmark-outline" size={20} color={colors.textSecondary} />
-                        <Text style={styles.appInfoText}>
-                            ClearHead v1.0 • Your data never leaves your device
-                        </Text>
-                    </GlassCard>
-                </Animated.View>
+                <View style={styles.appInfoCard}>
+                    <Ionicons name="information-circle-outline" size={16} color={colors.textSecondary} />
+                    <Text style={styles.appInfoText}>ClearHead v1.2.0 • Made with ❤️</Text>
+                </View>
             </ScrollView>
 
             {/* Password Modal */}
-            <GlassModal visible={showPasswordModal} onClose={() => {
-                setShowPasswordModal(false);
-                setPassword('');
-                setConfirmPassword('');
-                pendingBackupData.current = null;
-                pendingImportFile.current = null;
-                setIsExporting(false);
-            }}>
-                <Text style={styles.modalTitle}>
-                    {mode === 'export' ? 'Set Backup Password' : 'Enter Password'}
-                </Text>
-                <Text style={styles.modalDesc}>
-                    {mode === 'export'
-                        ? 'Set a new password for this specific backup file.'
-                        : 'Enter the password used when creating this backup.'}
-                </Text>
-                <GlassInput
-                    label="Password"
-                    placeholder="Enter password"
-                    value={password}
-                    onChangeText={setPassword}
-                    secureTextEntry
-                    containerStyle={styles.modalInput}
-                />
-                {mode === 'export' && (
-                    <GlassInput
-                        label="Confirm Password"
-                        placeholder="Confirm password"
-                        value={confirmPassword}
-                        onChangeText={setConfirmPassword}
-                        secureTextEntry
-                        containerStyle={styles.modalInput}
-                    />
-                )}
+            <GlassModal visible={showPasswordModal} onClose={() => { setShowPasswordModal(false); setPassword(''); setConfirmPassword(''); }}>
+                <Text style={styles.modalTitle}>{mode === 'export' ? 'Set Backup Password' : 'Enter Password'}</Text>
+                <GlassInput label="Password" value={password} onChangeText={setPassword} secureTextEntry containerStyle={styles.modalInput} />
+                {mode === 'export' && <GlassInput label="Confirm Password" value={confirmPassword} onChangeText={setConfirmPassword} secureTextEntry containerStyle={styles.modalInput} />}
                 <View style={styles.modalButtons}>
+                    <GlassButton title="Cancel" onPress={() => setShowPasswordModal(false)} variant="ghost" />
+                    <GlassButton title={mode === 'export' ? 'Export' : 'Decrypt'} onPress={handlePasswordSubmit} variant="primary" />
+                </View>
+            </GlassModal>
+
+            {/* Delete Dates Modal */}
+            <GlassModal visible={showDeleteModal} onClose={() => setShowDeleteModal(false)}>
+                <Text style={styles.modalTitle}>Select Days to Clear</Text>
+                <Text style={styles.modalDesc}>Select days to permanently remove from timeline history.</Text>
+
+                <ScrollView style={{ maxHeight: 300, marginBottom: 20 }}>
+                    {isLoadingDates ? (
+                        <Text style={{ textAlign: 'center', color: colors.textSecondary }}>Loading dates...</Text>
+                    ) : availableDates.length === 0 ? (
+                        <Text style={{ textAlign: 'center', color: colors.textSecondary }}>No history found.</Text>
+                    ) : (
+                        availableDates.map(date => (
+                            <Pressable
+                                key={date}
+                                style={[
+                                    styles.dateRow,
+                                    selectedDeleteDates.has(date) && { backgroundColor: '#EF444420', borderColor: '#EF4444' }
+                                ]}
+                                onPress={() => toggleDeleteDate(date)}
+                            >
+                                <Text style={[styles.dateText, selectedDeleteDates.has(date) && { color: '#EF4444', fontWeight: 'bold' }]}>
+                                    {new Date(date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                                </Text>
+                                {selectedDeleteDates.has(date) && <Ionicons name="checkmark-circle" size={20} color="#EF4444" />}
+                            </Pressable>
+                        ))
+                    )}
+                </ScrollView>
+
+                <View style={styles.modalButtons}>
+                    <GlassButton title="Cancel" onPress={() => setShowDeleteModal(false)} variant="ghost" />
                     <GlassButton
-                        title="Cancel"
-                        onPress={() => {
-                            setShowPasswordModal(false);
-                            setPassword('');
-                            setConfirmPassword('');
-                            setIsExporting(false);
-                        }}
-                        variant="ghost"
-                    />
-                    <GlassButton
-                        title={mode === 'export' ? 'Continue' : 'Decrypt'}
-                        onPress={handlePasswordSubmit}
+                        title={`Delete (${selectedDeleteDates.size})`}
+                        onPress={confirmDeleteDates}
                         variant="primary"
-                        disabled={!password || (mode === 'export' && !confirmPassword)}
+                        disabled={selectedDeleteDates.size === 0}
+                        style={{ backgroundColor: '#EF4444' }}
                     />
                 </View>
             </GlassModal>
@@ -605,5 +800,42 @@ const createStyles = (colors: any) => StyleSheet.create({
         flexDirection: 'row',
         justifyContent: 'flex-end',
         gap: spacing.sm,
+    },
+    clearButtonsRow: {
+        flexDirection: 'row',
+        gap: spacing.sm,
+        marginTop: spacing.md,
+    },
+    clearBtn: {
+        flex: 1,
+        paddingVertical: 8,
+        paddingHorizontal: 12,
+        borderRadius: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderWidth: 1,
+        flexDirection: 'row',
+        gap: 6,
+    },
+    clearBtnText: {
+        fontSize: typography.caption.fontSize,
+        fontWeight: '600',
+        textAlign: 'center',
+    },
+    dateRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingVertical: 12,
+        paddingHorizontal: 16,
+        borderRadius: 12,
+        backgroundColor: colors.glassSurface,
+        borderWidth: 1,
+        borderColor: colors.glassBorder,
+        marginBottom: 8,
+    },
+    dateText: {
+        fontSize: 16,
+        color: colors.textPrimary,
     },
 });

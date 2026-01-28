@@ -10,6 +10,7 @@ import * as Font from 'expo-font';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { initDatabase } from '@/database';
 import { useAppStore, useThemeStore } from '@/stores';
+import { setupNotifications, scheduleDailyNotifications } from '@/utils/notifications';
 
 // Keep splash screen visible while loading
 SplashScreen.preventAutoHideAsync();
@@ -36,6 +37,12 @@ export default function RootLayout() {
                 // Initialize database
                 await initDatabase();
                 setDbReady(true);
+
+                // Setup notifications
+                const hasPermission = await setupNotifications();
+                if (hasPermission) {
+                    await scheduleDailyNotifications();
+                }
             } catch (e) {
                 console.warn('Error loading app resources:', e);
             } finally {

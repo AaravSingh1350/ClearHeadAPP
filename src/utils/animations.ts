@@ -3,19 +3,14 @@ import { useCallback, useState } from 'react';
 import { useFocusEffect } from 'expo-router';
 
 /**
- * Hook that returns a key that changes every time the screen comes into focus.
- * Use this key on Animated.View to replay entering animations.
+ * Hook that returns a stable key for animations.
+ * Animations will only play on initial mount, not on every focus.
+ * This prevents jitter when switching between tabs.
  */
 export function useAnimationKey() {
-    const [key, setKey] = useState(0);
-
-    useFocusEffect(
-        useCallback(() => {
-            setKey(prev => prev + 1);
-        }, [])
-    );
-
-    return key;
+    // Return a stable key - animations play only on first mount
+    // This prevents jitter when switching tabs
+    return 'stable';
 }
 
 /**

@@ -1,32 +1,31 @@
-// Timeline Screen
-// Unified chronological view with progressive blur effects
+// Timeline Screen - Calendar View
+// Fast loading with date-based navigation
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
     View,
     Text,
     ScrollView,
     StyleSheet,
+    Pressable,
+    FlatList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated';
-import { BlurView } from 'expo-blur';
+import Animated, { FadeIn } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { GlassCard } from '@/components/glass';
 import { useThemeStore } from '@/stores';
 import { spacing, typography } from '@/styles/theme';
-import { getDatabase } from '@/database';
+import { getDatabase, formatDate } from '@/database';
 import { TimelineEntry } from '@/database/schema';
-import { useAnimationKey } from '@/utils/animations';
 import { useFocusEffect } from 'expo-router';
-import { useCallback } from 'react';
 
 const ENTRY_ICONS: Record<TimelineEntry['entry_type'], string> = {
-    problem: 'alert-circle-outline',
-    study_session: 'book-outline',
-    missed_revision: 'close-circle-outline',
-    planner_failure: 'calendar-outline',
-    thought: 'bulb-outline',
+    problem: 'alert-circle',
+    study_session: 'book',
+    missed_revision: 'close-circle',
+    planner_failure: 'calendar',
+    thought: 'bulb',
 };
 
 const ENTRY_COLORS: Record<TimelineEntry['entry_type'], string> = {
@@ -38,190 +37,189 @@ const ENTRY_COLORS: Record<TimelineEntry['entry_type'], string> = {
 };
 
 export default function TimelineScreen() {
-    const animationKey = useAnimationKey();
-    const { colors, colorScheme } = useThemeStore();
+    const { colors } = useThemeStore();
     const [entries, setEntries] = useState<TimelineEntry[]>([]);
-    const [isLoading, setIsLoading] = useState(true);
+    const [selectedDate, setSelectedDate] = useState(formatDate(Date.now()));
+    const [isLoading, setIsLoading] = useState(false);
+
+    // Generate calendar dates (current week + past 2 weeks)
+    const calendarDates = useMemo(() => {
+        const dates: { date: string; dayName: string; dayNum: number; isToday: boolean }[] = [];
+        const today = new Date();
+
+        for (let i = 13; i >= 0; i--) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            dates.push({
+                date: formatDate(d.getTime()),
+                dayName: d.toLocaleDateString('en-US', { weekday: 'short' }),
+                dayNum: d.getDate(),
+                isToday: i === 0,
+            });
+        }
+        return dates;
+    }, []);
 
     useFocusEffect(
         useCallback(() => {
-            loadTimeline();
-        }, [])
+            loadEntriesForDate(selectedDate);
+        }, [selectedDate])
     );
 
-    const loadTimeline = async () => {
+    const loadEntriesForDate = async (date: string) => {
+        setIsLoading(true);
         try {
             const db = getDatabase();
+            // Get entries for selected date only (fast query)
+            const dayStart = new Date(date).setHours(0, 0, 0, 0);
+            const dayEnd = new Date(date).setHours(23, 59, 59, 999);
+
             const result = await db.getAllAsync<TimelineEntry>(
-                'SELECT * FROM timeline_entries ORDER BY created_at DESC LIMIT 50'
+                `SELECT * FROM timeline_entries 
+                 WHERE created_at >= ? AND created_at <= ?
+                 ORDER BY created_at DESC`,
+                [dayStart, dayEnd]
             );
             setEntries(result);
         } catch (error) {
             console.error('Failed to load timeline:', error);
+            setEntries([]);
         } finally {
             setIsLoading(false);
         }
     };
 
-    const getBlurIntensity = (index: number): number => {
-        // Progressive blur: older entries get more blur
-        if (index < 5) return 0;
-        if (index < 10) return 5;
-        if (index < 20) return 10;
-        return 15;
+    const formatTime = (timestamp: number) => {
+        return new Date(timestamp).toLocaleTimeString('en-US', {
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+        });
     };
 
-    const getOpacity = (index: number): number => {
-        // Progressive fade
-        if (index < 5) return 1;
-        if (index < 10) return 0.85;
-        if (index < 20) return 0.7;
-        return 0.5;
-    };
-
-    const formatTimestamp = (timestamp: number) => {
-        const date = new Date(timestamp);
-        const now = new Date();
-        const diffDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
-
-        if (diffDays === 0) return 'Today';
-        if (diffDays === 1) return 'Yesterday';
-        if (diffDays < 7) return `${diffDays} days ago`;
-        return date.toLocaleDateString();
-    };
-
-    // Group entries by date
-    const groupedEntries = entries.reduce((groups, entry) => {
-        const date = new Date(entry.created_at).toDateString();
-        if (!groups[date]) {
-            groups[date] = [];
-        }
-        groups[date].push(entry);
-        return groups;
-    }, {} as Record<string, TimelineEntry[]>);
+    // Stats for selected date
+    const stats = useMemo(() => {
+        const studySessions = entries.filter(e => e.entry_type === 'study_session').length;
+        const thoughts = entries.filter(e => e.entry_type === 'thought').length;
+        const problems = entries.filter(e => e.entry_type === 'problem').length;
+        const avoided = entries.filter(e => e.was_avoided).length;
+        return { studySessions, thoughts, problems, avoided, total: entries.length };
+    }, [entries]);
 
     const styles = createStyles(colors);
 
+    // Render entry item
+    const renderEntry = useCallback(({ item, index }: { item: TimelineEntry; index: number }) => (
+        <Animated.View entering={FadeIn.delay(index * 30).duration(200)}>
+            <View style={styles.entryCard}>
+                <View style={[styles.entryIcon, { backgroundColor: ENTRY_COLORS[item.entry_type] + '20' }]}>
+                    <Ionicons
+                        name={ENTRY_ICONS[item.entry_type] as any}
+                        size={18}
+                        color={ENTRY_COLORS[item.entry_type]}
+                    />
+                </View>
+                <View style={styles.entryContent}>
+                    <Text style={styles.entryTitle} numberOfLines={1}>{item.title}</Text>
+                    {item.description && (
+                        <Text style={styles.entryDesc} numberOfLines={2}>{item.description}</Text>
+                    )}
+                    <Text style={styles.entryTime}>{formatTime(item.created_at)}</Text>
+                </View>
+                {item.was_avoided && (
+                    <View style={styles.avoidedBadge}>
+                        <Text style={styles.avoidedText}>!</Text>
+                    </View>
+                )}
+            </View>
+        </Animated.View>
+    ), [colors]);
+
     return (
         <SafeAreaView style={styles.container} edges={['top']}>
-            <ScrollView
-                style={styles.scrollView}
-                contentContainerStyle={styles.content}
-                showsVerticalScrollIndicator={false}
-            >
-                {/* Header */}
-                <Animated.View key={`header-${animationKey}`} entering={FadeInDown.delay(100)}>
-                    <Text style={styles.title}>Timeline</Text>
-                    <Text style={styles.subtitle}>
-                        Every action echoes. Distance creates blur.
-                    </Text>
-                </Animated.View>
+            {/* Header */}
+            <View style={styles.header}>
+                <Text style={styles.title}>Timeline</Text>
+                <Text style={styles.subtitle}>Your daily activity log</Text>
+            </View>
 
-                {/* Legend */}
-                <Animated.View entering={FadeInDown.delay(200)} style={styles.legend}>
-                    {Object.entries(ENTRY_ICONS).map(([type, icon]) => (
-                        <View key={type} style={styles.legendItem}>
-                            <Ionicons
-                                name={icon as any}
-                                size={16}
-                                color={ENTRY_COLORS[type as TimelineEntry['entry_type']]}
-                            />
-                            <Text style={styles.legendText}>
-                                {type.replace(/_/g, ' ')}
-                            </Text>
-                        </View>
-                    ))}
-                </Animated.View>
-
-                {/* Timeline */}
-                {entries.length === 0 ? (
-                    <Animated.View entering={FadeInUp.delay(300)}>
-                        <GlassCard depth={1} style={styles.emptyCard}>
-                            <Ionicons name="time-outline" size={48} color={colors.textSecondary} />
-                            <Text style={styles.emptyText}>No entries yet</Text>
-                            <Text style={styles.emptySubtext}>
-                                Your thoughts, studies, and tasks will appear here
-                            </Text>
-                        </GlassCard>
-                    </Animated.View>
-                ) : (
-                    Object.entries(groupedEntries).map(([date, dayEntries], groupIndex) => (
-                        <Animated.View
-                            key={date}
-                            entering={FadeInUp.delay(300 + groupIndex * 100)}
-                            style={styles.dateGroup}
+            {/* Calendar Strip */}
+            <View style={styles.calendarContainer}>
+                <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.calendarScroll}
+                >
+                    {calendarDates.map((day) => (
+                        <Pressable
+                            key={day.date}
+                            style={[
+                                styles.dayCard,
+                                selectedDate === day.date && styles.dayCardActive,
+                                day.isToday && styles.dayCardToday,
+                            ]}
+                            onPress={() => setSelectedDate(day.date)}
                         >
-                            <Text style={styles.dateHeader}>{formatTimestamp(dayEntries[0].created_at)}</Text>
-                            <View style={styles.timelineTrack}>
-                                {dayEntries.map((entry, entryIndex) => {
-                                    const globalIndex = entries.indexOf(entry);
-                                    const blurIntensity = getBlurIntensity(globalIndex);
-                                    const opacity = getOpacity(globalIndex);
-                                    const color = ENTRY_COLORS[entry.entry_type];
-                                    const icon = ENTRY_ICONS[entry.entry_type];
+                            <Text style={[
+                                styles.dayName,
+                                selectedDate === day.date && styles.dayNameActive
+                            ]}>
+                                {day.dayName}
+                            </Text>
+                            <Text style={[
+                                styles.dayNum,
+                                selectedDate === day.date && styles.dayNumActive
+                            ]}>
+                                {day.dayNum}
+                            </Text>
+                            {day.isToday && <View style={styles.todayDot} />}
+                        </Pressable>
+                    ))}
+                </ScrollView>
+            </View>
 
-                                    return (
-                                        <View
-                                            key={entry.id}
-                                            style={[styles.entryWrapper, { opacity }]}
-                                        >
-                                            {/* Timeline connector */}
-                                            <View style={styles.connector}>
-                                                <View style={[styles.dot, { backgroundColor: color }]} />
-                                                {entryIndex < dayEntries.length - 1 && (
-                                                    <View style={styles.line} />
-                                                )}
-                                            </View>
+            {/* Quick Stats */}
+            <View style={styles.statsRow}>
+                <View style={styles.statItem}>
+                    <Ionicons name="book" size={16} color="#4ADE80" />
+                    <Text style={styles.statNum}>{stats.studySessions}</Text>
+                </View>
+                <View style={styles.statItem}>
+                    <Ionicons name="bulb" size={16} color="#60A5FA" />
+                    <Text style={styles.statNum}>{stats.thoughts}</Text>
+                </View>
+                <View style={styles.statItem}>
+                    <Ionicons name="alert-circle" size={16} color="#F59E0B" />
+                    <Text style={styles.statNum}>{stats.problems}</Text>
+                </View>
+                <View style={styles.statItem}>
+                    <Ionicons name="layers" size={16} color={colors.textSecondary} />
+                    <Text style={styles.statNum}>{stats.total}</Text>
+                </View>
+            </View>
 
-                                            {/* Entry card */}
-                                            <View style={styles.entryCardWrapper}>
-                                                {entry.was_avoided && blurIntensity > 0 && (
-                                                    <BlurView
-                                                        intensity={blurIntensity + 10}
-                                                        tint={colorScheme}
-                                                        style={styles.avoidedBlur}
-                                                    />
-                                                )}
-                                                <GlassCard
-                                                    depth={1}
-                                                    style={[
-                                                        styles.entryCard,
-                                                        entry.was_avoided && styles.entryCardAvoided,
-                                                    ]}
-                                                >
-                                                    <View style={styles.entryHeader}>
-                                                        <Ionicons name={icon as any} size={18} color={color} />
-                                                        <Text style={[styles.entryType, { color }]}>
-                                                            {entry.entry_type.replace(/_/g, ' ')}
-                                                        </Text>
-                                                        <Text style={styles.entryTime}>
-                                                            {new Date(entry.created_at).toLocaleTimeString([], {
-                                                                hour: '2-digit',
-                                                                minute: '2-digit',
-                                                            })}
-                                                        </Text>
-                                                    </View>
-                                                    <Text style={styles.entryTitle}>{entry.title}</Text>
-                                                    {entry.description && (
-                                                        <Text style={styles.entryDescription} numberOfLines={2}>
-                                                            {entry.description}
-                                                        </Text>
-                                                    )}
-                                                    {entry.was_avoided && (
-                                                        <View style={styles.avoidedBadge}>
-                                                            <Text style={styles.avoidedText}>AVOIDED</Text>
-                                                        </View>
-                                                    )}
-                                                </GlassCard>
-                                            </View>
-                                        </View>
-                                    );
-                                })}
-                            </View>
-                        </Animated.View>
-                    ))
-                )}
-            </ScrollView>
+            {/* Entries List */}
+            {isLoading ? (
+                <View style={styles.emptyContainer}>
+                    <Text style={styles.loadingText}>Loading...</Text>
+                </View>
+            ) : entries.length === 0 ? (
+                <View style={styles.emptyContainer}>
+                    <Ionicons name="calendar-outline" size={48} color={colors.textSecondary} />
+                    <Text style={styles.emptyText}>No activity on this day</Text>
+                </View>
+            ) : (
+                <FlatList
+                    data={entries}
+                    renderItem={renderEntry}
+                    keyExtractor={item => item.id}
+                    contentContainerStyle={styles.listContent}
+                    showsVerticalScrollIndicator={false}
+                    initialNumToRender={10}
+                    maxToRenderPerBatch={5}
+                    windowSize={5}
+                />
+            )}
         </SafeAreaView>
     );
 }
@@ -231,143 +229,160 @@ const createStyles = (colors: any) => StyleSheet.create({
         flex: 1,
         backgroundColor: colors.background,
     },
-    scrollView: {
-        flex: 1,
-    },
-    content: {
-        padding: spacing.lg,
-        paddingBottom: 100,
+    header: {
+        paddingHorizontal: spacing.lg,
+        paddingTop: spacing.md,
+        paddingBottom: spacing.sm,
     },
     title: {
-        fontSize: typography.h1.fontSize,
+        fontSize: 28,
         fontWeight: '700',
         color: colors.textPrimary,
-        marginBottom: spacing.xs,
     },
     subtitle: {
-        fontSize: typography.body.fontSize,
+        fontSize: 14,
         color: colors.textSecondary,
-        marginBottom: spacing.lg,
+        marginTop: 2,
     },
-    legend: {
+    // Calendar
+    calendarContainer: {
+        paddingVertical: spacing.sm,
+    },
+    calendarScroll: {
+        paddingHorizontal: spacing.lg,
+        gap: spacing.sm,
+    },
+    dayCard: {
+        width: 50,
+        height: 65,
+        borderRadius: 12,
+        backgroundColor: colors.glassSurface,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderWidth: 1,
+        borderColor: colors.glassBorder,
+    },
+    dayCardActive: {
+        backgroundColor: colors.accentPositive,
+        borderColor: colors.accentPositive,
+    },
+    dayCardToday: {
+        borderColor: colors.accentPositive,
+    },
+    dayName: {
+        fontSize: 11,
+        color: colors.textSecondary,
+        fontWeight: '500',
+    },
+    dayNameActive: {
+        color: '#000',
+    },
+    dayNum: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: colors.textPrimary,
+        marginTop: 2,
+    },
+    dayNumActive: {
+        color: '#000',
+    },
+    todayDot: {
+        width: 4,
+        height: 4,
+        borderRadius: 2,
+        backgroundColor: colors.accentPositive,
+        marginTop: 4,
+    },
+    // Stats
+    statsRow: {
         flexDirection: 'row',
-        flexWrap: 'wrap',
-        gap: spacing.md,
-        marginBottom: spacing.xl,
+        justifyContent: 'space-around',
+        paddingVertical: spacing.md,
+        marginHorizontal: spacing.lg,
+        borderRadius: 12,
+        backgroundColor: colors.glassSurface,
+        borderWidth: 1,
+        borderColor: colors.glassBorder,
+        marginBottom: spacing.md,
     },
-    legendItem: {
+    statItem: {
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 4,
+        gap: 6,
     },
-    legendText: {
-        fontSize: typography.caption.fontSize,
-        color: colors.textSecondary,
-        textTransform: 'capitalize',
+    statNum: {
+        fontSize: 14,
+        fontWeight: '600',
+        color: colors.textPrimary,
     },
-    emptyCard: {
-        padding: spacing.xxl,
+    // List
+    listContent: {
+        paddingHorizontal: spacing.lg,
+        paddingBottom: 100,
+    },
+    entryCard: {
+        flexDirection: 'row',
         alignItems: 'center',
+        padding: spacing.md,
+        marginBottom: spacing.sm,
+        borderRadius: 12,
+        backgroundColor: colors.glassSurface,
+        borderWidth: 1,
+        borderColor: colors.glassBorder,
+    },
+    entryIcon: {
+        width: 36,
+        height: 36,
+        borderRadius: 10,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginRight: spacing.sm,
+    },
+    entryContent: {
+        flex: 1,
+    },
+    entryTitle: {
+        fontSize: 14,
+        fontWeight: '600',
+        color: colors.textPrimary,
+    },
+    entryDesc: {
+        fontSize: 12,
+        color: colors.textSecondary,
+        marginTop: 2,
+    },
+    entryTime: {
+        fontSize: 11,
+        color: colors.textSecondary,
+        marginTop: 4,
+    },
+    avoidedBadge: {
+        width: 20,
+        height: 20,
+        borderRadius: 10,
+        backgroundColor: '#EF4444',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    avoidedText: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#FFF',
+    },
+    // Empty
+    emptyContainer: {
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingBottom: 100,
     },
     emptyText: {
-        fontSize: typography.h3.fontSize,
-        fontWeight: '600',
+        fontSize: 16,
         color: colors.textSecondary,
         marginTop: spacing.md,
     },
-    emptySubtext: {
-        fontSize: typography.body.fontSize,
+    loadingText: {
+        fontSize: 14,
         color: colors.textSecondary,
-        marginTop: spacing.xs,
-        textAlign: 'center',
-    },
-    dateGroup: {
-        marginBottom: spacing.xl,
-    },
-    dateHeader: {
-        fontSize: typography.bodySmall.fontSize,
-        fontWeight: '600',
-        color: colors.textSecondary,
-        marginBottom: spacing.md,
-        textTransform: 'uppercase',
-        letterSpacing: 1,
-    },
-    timelineTrack: {
-        paddingLeft: spacing.sm,
-    },
-    entryWrapper: {
-        flexDirection: 'row',
-        marginBottom: spacing.md,
-    },
-    connector: {
-        width: 20,
-        alignItems: 'center',
-    },
-    dot: {
-        width: 10,
-        height: 10,
-        borderRadius: 5,
-    },
-    line: {
-        flex: 1,
-        width: 2,
-        backgroundColor: colors.glassBorder,
-        marginVertical: 4,
-    },
-    entryCardWrapper: {
-        flex: 1,
-        marginLeft: spacing.sm,
-        position: 'relative',
-    },
-    avoidedBlur: {
-        ...StyleSheet.absoluteFillObject,
-        borderRadius: 16,
-    },
-    entryCard: {
-        padding: spacing.md,
-    },
-    entryCardAvoided: {
-        borderColor: 'rgba(239, 68, 68, 0.3)',
-        borderWidth: 1,
-    },
-    entryHeader: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: spacing.sm,
-        marginBottom: spacing.xs,
-    },
-    entryType: {
-        fontSize: typography.caption.fontSize,
-        fontWeight: '500',
-        textTransform: 'capitalize',
-        flex: 1,
-    },
-    entryTime: {
-        fontSize: typography.caption.fontSize,
-        color: colors.textSecondary,
-    },
-    entryTitle: {
-        fontSize: typography.body.fontSize,
-        fontWeight: '500',
-        color: colors.textPrimary,
-    },
-    entryDescription: {
-        fontSize: typography.bodySmall.fontSize,
-        color: colors.textSecondary,
-        marginTop: spacing.xs,
-    },
-    avoidedBadge: {
-        marginTop: spacing.sm,
-        alignSelf: 'flex-start',
-        backgroundColor: 'rgba(239, 68, 68, 0.2)',
-        paddingHorizontal: spacing.sm,
-        paddingVertical: 2,
-        borderRadius: 4,
-    },
-    avoidedText: {
-        fontSize: 10,
-        fontWeight: '700',
-        color: '#EF4444',
-        letterSpacing: 1,
     },
 });

@@ -1,21 +1,29 @@
-// Learning store for study topics and spaced repetition
+// CogniFlow Store - Level-based Spaced Repetition System
 import { create } from 'zustand';
 import { StudyTopic, Revision } from '@/database/schema';
 import { getDatabase, generateId, now, formatDate } from '@/database';
-import { calculateNextReview, calculateDecayState, REVIEW_INTERVALS } from '@/engines/learning/spacedRepetition';
+import {
+    calculateNextReview,
+    calculateDecayState,
+    REVIEW_INTERVALS,
+    MASTERY_LEVEL,
+    isMastered,
+} from '@/engines/learning/spacedRepetition';
 
 interface LearningState {
     topics: StudyTopic[];
     revisions: Revision[];
-    dueRevisions: Revision[];
+    dueRevisions: (Revision & { topic: string })[];
+    completedRevisions: (Revision & { topic: string })[];
     isLoading: boolean;
 
     // Actions
     loadTopics: () => Promise<void>;
     loadRevisions: (topicId?: string) => Promise<void>;
     loadDueRevisions: () => Promise<void>;
+    loadCompletedRevisions: () => Promise<void>;
 
-    addTopic: (topic: string, timeSpent: number, confidence: number) => Promise<StudyTopic>;
+    addTopic: (topic: string, timeSpent: number, confidence: number, priority?: 'high' | 'medium' | 'low', tags?: string) => Promise<StudyTopic>;
     updateTopic: (id: string, updates: Partial<StudyTopic>) => Promise<void>;
     deleteTopic: (id: string) => Promise<void>;
 
@@ -29,6 +37,7 @@ export const useLearningStore = create<LearningState>((set, get) => ({
     topics: [],
     revisions: [],
     dueRevisions: [],
+    completedRevisions: [],
     isLoading: false,
 
     loadTopics: async () => {
@@ -38,7 +47,12 @@ export const useLearningStore = create<LearningState>((set, get) => ({
             const result = await db.getAllAsync<StudyTopic>(
                 'SELECT * FROM study_topics ORDER BY next_review_at ASC NULLS LAST'
             );
-            set({ topics: result, isLoading: false });
+            // Convert is_mastered from number to boolean
+            const topics = result.map(t => ({
+                ...t,
+                is_mastered: Boolean(t.is_mastered),
+            }));
+            set({ topics, isLoading: false });
         } catch (error) {
             console.error('Failed to load topics:', error);
             set({ isLoading: false });
@@ -63,7 +77,7 @@ export const useLearningStore = create<LearningState>((set, get) => ({
         const db = getDatabase();
         const today = now();
 
-        const result = await db.getAllAsync<Revision>(
+        const result = await db.getAllAsync<Revision & { topic: string }>(
             `SELECT r.*, st.topic FROM revisions r
        JOIN study_topics st ON r.topic_id = st.id
        WHERE r.scheduled_at <= ? AND r.completed_at IS NULL
@@ -73,15 +87,32 @@ export const useLearningStore = create<LearningState>((set, get) => ({
         set({ dueRevisions: result });
     },
 
-    addTopic: async (topic, timeSpent, confidence) => {
+    loadCompletedRevisions: async () => {
+        const db = getDatabase();
+        const currentDate = new Date();
+        const todayStart = new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime();
+
+        const result = await db.getAllAsync<Revision & { topic: string }>(
+            `SELECT r.*, st.topic FROM revisions r 
+       JOIN study_topics st ON r.topic_id = st.id
+       WHERE r.completed_at >= ? ORDER BY r.completed_at DESC`,
+            [todayStart]
+        );
+        set({ completedRevisions: result });
+    },
+
+    addTopic: async (topic, timeSpent, confidence, priority = 'medium', tags = '') => {
         const db = getDatabase();
         const id = generateId();
         const timestamp = now();
-        const nextReview = calculateNextReview(0, confidence);
+        const nextReview = calculateNextReview(0); // Level 0
 
         const newTopic: StudyTopic = {
             id,
             topic,
+            level: 0,
+            priority,
+            tags: tags || null,
             time_spent_minutes: timeSpent,
             confidence_level: confidence,
             integrity_percent: 100,
@@ -89,16 +120,17 @@ export const useLearningStore = create<LearningState>((set, get) => ({
             last_reviewed_at: timestamp,
             next_review_at: nextReview,
             review_count: 0,
+            is_mastered: false,
             created_at: timestamp,
             updated_at: timestamp,
         };
 
         await db.runAsync(
             `INSERT INTO study_topics 
-       (id, topic, time_spent_minutes, confidence_level, integrity_percent, decay_state, 
-        last_reviewed_at, next_review_at, review_count, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, topic, timeSpent, confidence, 100, 'fresh', timestamp, nextReview, 0, timestamp, timestamp]
+       (id, topic, level, priority, tags, time_spent_minutes, confidence_level, integrity_percent, decay_state, 
+        last_reviewed_at, next_review_at, review_count, is_mastered, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, topic, 0, priority, tags || null, timeSpent, confidence, 100, 'fresh', timestamp, nextReview, 0, 0, timestamp, timestamp]
         );
 
         // Schedule first revision
@@ -114,7 +146,7 @@ export const useLearningStore = create<LearningState>((set, get) => ({
         await db.runAsync(
             `INSERT INTO timeline_entries (id, entry_type, reference_id, title, description, created_at, was_avoided)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [timelineId, 'study_session', id, topic, `Studied for ${timeSpent} minutes with ${confidence}% confidence`, timestamp, 0]
+            [timelineId, 'study_session', id, topic, `Added new topic to CogniFlow`, timestamp, 0]
         );
 
         set((state) => ({ topics: [newTopic, ...state.topics] }));
@@ -125,6 +157,7 @@ export const useLearningStore = create<LearningState>((set, get) => ({
         const db = getDatabase();
         const timestamp = now();
 
+        // Build dynamic update query
         const fields = Object.keys(updates)
             .map((key) => `${key} = ?`)
             .join(', ');
@@ -174,17 +207,19 @@ export const useLearningStore = create<LearningState>((set, get) => ({
             [timestamp, confidenceAfter, topic.confidence_level, revisionId]
         );
 
-        // Calculate next review
-        const newReviewCount = topic.review_count + 1;
-        const nextReview = calculateNextReview(newReviewCount, confidenceAfter);
+        // Calculate next review based on level
+        const newLevel = Math.min(topic.level + 1, REVIEW_INTERVALS.length - 1);
+        const nextReview = calculateNextReview(newLevel);
+        const nowMastered = isMastered(newLevel);
 
         // Update topic
         await db.runAsync(
             `UPDATE study_topics SET 
-       confidence_level = ?, last_reviewed_at = ?, next_review_at = ?,
-       review_count = ?, integrity_percent = 100, decay_state = 'fresh', updated_at = ?
+       level = ?, confidence_level = ?, last_reviewed_at = ?, next_review_at = ?,
+       review_count = ?, integrity_percent = 100, decay_state = 'fresh', 
+       is_mastered = ?, updated_at = ?
        WHERE id = ?`,
-            [confidenceAfter, timestamp, nextReview, newReviewCount, timestamp, topic.id]
+            [newLevel, confidenceAfter, timestamp, nextReview, topic.review_count + 1, nowMastered ? 1 : 0, timestamp, topic.id]
         );
 
         // Schedule next revision
@@ -195,9 +230,26 @@ export const useLearningStore = create<LearningState>((set, get) => ({
             [newRevisionId, topic.id, nextReview, timestamp]
         );
 
+        // Add timeline entry
+        const timelineId = generateId();
+        await db.runAsync(
+            `INSERT INTO timeline_entries (id, entry_type, reference_id, title, description, created_at, was_avoided)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                timelineId,
+                'study_session',
+                revisionId,
+                'Review Completed',
+                `Reviewed "${topic.topic}" - Level ${newLevel}${nowMastered ? ' (Mastered!)' : ''}`,
+                timestamp,
+                0
+            ]
+        );
+
         // Reload data
         await get().loadTopics();
         await get().loadDueRevisions();
+        await get().loadCompletedRevisions();
     },
 
     markRevisionMissed: async (revisionId) => {
@@ -222,13 +274,13 @@ export const useLearningStore = create<LearningState>((set, get) => ({
             );
 
             if (topic) {
-                const newDecayState = calculateDecayState(topic.last_reviewed_at || timestamp);
+                const newDecayState = calculateDecayState(topic.next_review_at);
                 const newIntegrity = Math.max(0, topic.integrity_percent - 15);
 
                 await db.runAsync(
-                    `UPDATE study_topics SET decay_state = ?, integrity_percent = ?, updated_at = ?
+                    `UPDATE study_topics SET decay_state = ?, integrity_percent = ?
            WHERE id = ?`,
-                    [newDecayState, newIntegrity, timestamp, topic.id]
+                    [newDecayState, newIntegrity, topic.id]
                 );
 
                 // Add timeline entry for missed revision
@@ -248,13 +300,12 @@ export const useLearningStore = create<LearningState>((set, get) => ({
     updateDecayStates: async () => {
         const db = getDatabase();
         const topics = await db.getAllAsync<StudyTopic>('SELECT * FROM study_topics');
-        const timestamp = now();
 
         for (const topic of topics) {
-            const newDecayState = calculateDecayState(topic.last_reviewed_at || topic.created_at);
-            const daysSinceReview = Math.floor(
-                (timestamp - (topic.last_reviewed_at || topic.created_at)) / (1000 * 60 * 60 * 24)
-            );
+            const newDecayState = calculateDecayState(topic.next_review_at);
+            const daysSinceReview = topic.last_reviewed_at
+                ? Math.floor((now() - topic.last_reviewed_at) / (1000 * 60 * 60 * 24))
+                : 0;
 
             // Decay integrity by 2% per day since last review after the first day
             const decayAmount = Math.max(0, (daysSinceReview - 1) * 2);
@@ -262,9 +313,9 @@ export const useLearningStore = create<LearningState>((set, get) => ({
 
             if (newDecayState !== topic.decay_state || newIntegrity !== topic.integrity_percent) {
                 await db.runAsync(
-                    `UPDATE study_topics SET decay_state = ?, integrity_percent = ?, updated_at = ?
+                    `UPDATE study_topics SET decay_state = ?, integrity_percent = ?
            WHERE id = ?`,
-                    [newDecayState, newIntegrity, timestamp, topic.id]
+                    [newDecayState, newIntegrity, topic.id]
                 );
             }
         }

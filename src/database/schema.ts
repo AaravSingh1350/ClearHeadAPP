@@ -15,17 +15,21 @@ CREATE TABLE IF NOT EXISTS thoughts (
   updated_at INTEGER NOT NULL
 );
 
--- Study topics for learning engine
+-- Study topics for CogniFlow (Level-based SRS)
 CREATE TABLE IF NOT EXISTS study_topics (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
+  level INTEGER NOT NULL DEFAULT 0,
+  priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('high', 'medium', 'low')),
+  tags TEXT,
   time_spent_minutes INTEGER NOT NULL DEFAULT 0,
   confidence_level INTEGER NOT NULL DEFAULT 50 CHECK(confidence_level >= 0 AND confidence_level <= 100),
   integrity_percent INTEGER NOT NULL DEFAULT 100,
-  decay_state TEXT NOT NULL DEFAULT 'fresh' CHECK(decay_state IN ('fresh', 'unstable', 'decaying', 'neglected')),
+  decay_state TEXT NOT NULL DEFAULT 'fresh' CHECK(decay_state IN ('fresh', 'due', 'overdue', 'critical')),
   last_reviewed_at INTEGER,
   next_review_at INTEGER,
   review_count INTEGER NOT NULL DEFAULT 0,
+  is_mastered INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -42,19 +46,32 @@ CREATE TABLE IF NOT EXISTS revisions (
   created_at INTEGER NOT NULL
 );
 
--- Tasks for cost-based planner
+-- Tasks for time-based planner
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   time_estimate_minutes INTEGER NOT NULL,
   decay_cost INTEGER NOT NULL DEFAULT 1,
   is_recovery INTEGER NOT NULL DEFAULT 0,
+  is_habit INTEGER NOT NULL DEFAULT 0,
+  habit_id TEXT REFERENCES habits(id),
   original_task_id TEXT REFERENCES tasks(id),
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'completed', 'skipped')),
   scheduled_date TEXT,
+  scheduled_time TEXT,
   priority INTEGER CHECK(priority >= 1 AND priority <= 3),
   completed_at INTEGER,
   skipped_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Habits for daily repeatable tasks
+CREATE TABLE IF NOT EXISTS habits (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  time_estimate_minutes INTEGER NOT NULL DEFAULT 30,
+  is_active INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -126,13 +143,17 @@ export interface Thought {
 export interface StudyTopic {
   id: string;
   topic: string;
+  level: number;
+  priority: 'high' | 'medium' | 'low';
+  tags: string | null;
   time_spent_minutes: number;
   confidence_level: number;
   integrity_percent: number;
-  decay_state: 'fresh' | 'unstable' | 'decaying' | 'neglected';
+  decay_state: 'fresh' | 'due' | 'overdue' | 'critical';
   last_reviewed_at: number | null;
   next_review_at: number | null;
   review_count: number;
+  is_mastered: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -154,12 +175,24 @@ export interface Task {
   time_estimate_minutes: number;
   decay_cost: number;
   is_recovery: boolean;
+  is_habit: boolean;
+  habit_id: string | null;
   original_task_id: string | null;
   status: 'pending' | 'in_progress' | 'completed' | 'skipped';
   scheduled_date: string | null;
+  scheduled_time: string | null;
   priority: 1 | 2 | 3 | null;
   completed_at: number | null;
   skipped_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface Habit {
+  id: string;
+  name: string;
+  time_estimate_minutes: number;
+  is_active: boolean;
   created_at: number;
   updated_at: number;
 }

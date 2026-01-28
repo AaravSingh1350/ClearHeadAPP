@@ -25,7 +25,7 @@ interface TabConfig {
 
 const tabs: TabConfig[] = [
     { name: 'thinking', title: 'Think', iconOutline: 'bulb-outline', iconFilled: 'bulb' },
-    { name: 'learning', title: 'Learn', iconOutline: 'book-outline', iconFilled: 'book' },
+    { name: 'learning', title: 'CogniFlow', iconOutline: 'book-outline', iconFilled: 'book' },
     { name: 'planner', title: 'Plan', iconOutline: 'calendar-outline', iconFilled: 'calendar' },
     { name: 'timeline', title: 'Timeline', iconOutline: 'time-outline', iconFilled: 'time' },
     { name: 'insights', title: 'Insights', iconOutline: 'analytics-outline', iconFilled: 'analytics' },

@@ -6,8 +6,11 @@
     "orientation": "portrait",
     "scheme": "clearhead",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
+    "icon": "./assets/icon.png",
     "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
       "backgroundColor": "#0A0A0A"
     },
     "ios": {
@@ -16,6 +19,7 @@
     },
     "android": {
       "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0A0A0A"
       },
       "package": "com.clearhead.app"
@@ -27,7 +31,16 @@
     "plugins": [
       "expo-router",
       "expo-font",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-sqlite",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "2.0.21"
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
@@ -37,8 +50,9 @@
         "origin": false
       },
       "eas": {
-        "projectId": "6b7fa930-0f5e-408e-bd8c-7a7951cad127"
+        "projectId": "22224c28-51b4-4143-99fb-d940357acf84"
       }
-    }
+    },
+    "owner": "aaravsingh1350"
   }
 }
